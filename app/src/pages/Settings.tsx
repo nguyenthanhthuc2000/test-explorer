@@ -132,6 +132,26 @@ export function Settings() {
             </label>
           </div>
         </div>
+
+        <label className="grid gap-1">
+          <div className="text-xs font-bold text-slate-300">Context cho AI (optional)</div>
+          <textarea
+            value={cfg.context ?? ""}
+            onChange={(e) => setCfg((c) => ({ ...c, context: e.target.value }))}
+            rows={5}
+            className="resize-y rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
+            placeholder={[
+              "Ví dụ:",
+              "- App domain: e-commerce",
+              "- User role: admin",
+              "- Mục tiêu: kiểm tra navigation + console error",
+              "- Những flow quan trọng: login -> dashboard -> orders"
+            ].join("\n")}
+          />
+          <div className="text-xs text-slate-400">
+            Nếu để trống thì AI vẫn chạy như bình thường, chỉ là không có thêm ngữ cảnh.
+          </div>
+        </label>
       </div>
 
       <div className="grid gap-3 rounded-2xl border border-white/10 bg-black/20 p-4">

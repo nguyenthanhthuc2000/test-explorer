@@ -8,6 +8,7 @@ export type TestModuleKey =
 
 export type AppConfig = {
   targetUrl: string;
+  context?: string;
   crawl: {
     maxDepth: number;
     maxPages: number;
@@ -20,6 +21,7 @@ export type AppConfig = {
 
 export const defaultConfig: AppConfig = {
   targetUrl: "https://example.com",
+  context: "",
   crawl: { maxDepth: 2, maxPages: 30 },
   modules: {
     ui_interaction: true,

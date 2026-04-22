@@ -5,9 +5,95 @@ import type { RunReport } from "./types";
 import { getConfig } from "../db/repository/config.repo";
 import { insertRun } from "../db/repository/run.repo";
 import { insertSteps } from "../db/repository/step.repo";
+import type { AppConfig, TestModuleKey } from "./config";
+import { openPage } from "../playwright/browser";
 
 function newId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+const moduleLabels: Record<TestModuleKey, string> = {
+  ui_interaction: "UI interaction",
+  navigation: "Navigation / flow",
+  form: "Form testing",
+  api_network: "API / network",
+  console_error: "Console errors",
+  visual: "Visual testing"
+};
+
+function enabledModules(cfg: AppConfig) {
+  return (Object.keys(cfg.modules) as TestModuleKey[]).filter((k) => cfg.modules[k]);
+}
+
+function buildModuleSteps(cfg: AppConfig) {
+  const modules = enabledModules(cfg);
+  if (modules.length === 0) {
+    return [
+      {
+        id: newId(),
+        title: "No modules selected",
+        status: "fail" as const,
+        details: "Bạn đang tắt hết module. Hãy bật ít nhất 1 module trong Config."
+      }
+    ];
+  }
+
+  const steps: RunReport["steps"] = [];
+
+  for (const k of modules) {
+    steps.push({
+      id: newId(),
+      title: `[${moduleLabels[k]}] Plan`,
+      status: "info",
+      details: "TODO: build real engine per module (Playwright crawler/executor/validators)."
+    });
+
+    if (k === "ui_interaction") {
+      steps.push({
+        id: newId(),
+        title: `[${moduleLabels[k]}] Click & basic interactions`,
+        status: "info",
+        details: "Placeholder: sẽ detect element không click được / UI crash."
+      });
+    } else if (k === "navigation") {
+      steps.push({
+        id: newId(),
+        title: `[${moduleLabels[k]}] Crawl links & detect dead/loop`,
+        status: "info",
+        details: `Placeholder BFS: maxDepth=${cfg.crawl.maxDepth}, maxPages=${cfg.crawl.maxPages}`
+      });
+    } else if (k === "form") {
+      steps.push({
+        id: newId(),
+        title: `[${moduleLabels[k]}] Fill + submit + validate`,
+        status: "info",
+        details: "Placeholder: sẽ thử data invalid/empty và check validation messages."
+      });
+    } else if (k === "api_network") {
+      steps.push({
+        id: newId(),
+        title: `[${moduleLabels[k]}] Intercept requests`,
+        status: "info",
+        details: "Placeholder: sẽ check status code 4xx/5xx, timeout, failed requests."
+      });
+    } else if (k === "console_error") {
+      steps.push({
+        id: newId(),
+        title: `[${moduleLabels[k]}] Capture console errors`,
+        status: "info",
+        details: "Placeholder: sẽ fail nếu có Uncaught/SEVERE warnings."
+      });
+    } else if (k === "visual") {
+      steps.push({
+        id: newId(),
+        title: `[${moduleLabels[k]}] Screenshot diff`,
+        status: "info",
+        details: "Placeholder: sẽ so sánh baseline vs current (phase 3)."
+      });
+    }
+  }
+
+  return steps;
 }
 
 export async function runOrchestrator(input: { url: string }): Promise<RunReport> {
@@ -15,27 +101,90 @@ export async function runOrchestrator(input: { url: string }): Promise<RunReport
   const runId = newId();
   const startedAt = new Date().toISOString();
 
-  const steps: RunReport["steps"] = [
-    { id: newId(), title: "Open target URL", status: "info", details: input.url },
-    {
+  const steps: RunReport["steps"] = [];
+  steps.push({ id: newId(), title: "Open target URL", status: "info", details: input.url });
+  steps.push({
+    id: newId(),
+    title: "Selected modules",
+    status: "info",
+    details: enabledModules(cfg).map((k) => moduleLabels[k]).join(", ")
+  });
+  if (cfg.context?.trim()) {
+    steps.push({ id: newId(), title: "AI context", status: "info", details: cfg.context.trim() });
+  }
+
+  const modules = enabledModules(cfg);
+  if (modules.length === 0) {
+    steps.push({
       id: newId(),
-      title: "Selected modules",
-      status: "info",
-      details: Object.entries(cfg.modules)
-        .filter(([, v]) => v)
-        .map(([k]) => k)
-        .join(", ")
-    },
-    { id: newId(), title: "Crawl (placeholder)", status: "info", details: `maxDepth=${cfg.crawl.maxDepth}, maxPages=${cfg.crawl.maxPages}` },
-    { id: newId(), title: "Validators (placeholder)", status: "info", details: "TODO: console/network/ui validators" }
-  ];
+      title: "No modules selected",
+      status: "fail",
+      details: "Bạn đang tắt hết module. Hãy bật ít nhất 1 module trong Config."
+    });
+  }
+
+  // Real MVP execution for high-value modules.
+  let consoleErrors: string[] = [];
+  let pageErrors: string[] = [];
+  let failedRequests: string[] = [];
+  let badResponses: string[] = [];
+
+  if (modules.length > 0 && (cfg.modules.console_error || cfg.modules.api_network)) {
+    const session = await openPage(input.url);
+    try {
+      session.page.on("pageerror", (err) => {
+        pageErrors.push(String(err?.message ?? err));
+      });
+      session.page.on("console", (msg) => {
+        const type = msg.type();
+        if (type === "error") consoleErrors.push(msg.text());
+      });
+      session.page.on("requestfailed", (req) => {
+        const fail = req.failure();
+        failedRequests.push(`${req.method()} ${req.url()}${fail?.errorText ? ` - ${fail.errorText}` : ""}`);
+      });
+      session.page.on("response", (res) => {
+        const status = res.status();
+        if (status >= 400) badResponses.push(`${status} ${res.request().method()} ${res.url()}`);
+      });
+
+      // Give the page a moment to settle and emit console/network events.
+      await session.page.waitForTimeout(2500);
+    } finally {
+      await session.close();
+    }
+  }
+
+  // Build per-module steps (some are real, some placeholders).
+  steps.push(...buildModuleSteps(cfg));
+
+  if (cfg.modules.console_error) {
+    const errs = [...pageErrors, ...consoleErrors].filter(Boolean);
+    steps.push({
+      id: newId(),
+      title: `[${moduleLabels.console_error}] Result`,
+      status: errs.length ? "fail" : "pass",
+      details: errs.length ? errs.slice(0, 20).join("\n") : "No pageerror / console.error detected."
+    });
+  }
+
+  if (cfg.modules.api_network) {
+    const issues = [...failedRequests, ...badResponses].filter(Boolean);
+    steps.push({
+      id: newId(),
+      title: `[${moduleLabels.api_network}] Result`,
+      status: issues.length ? "fail" : "pass",
+      details: issues.length ? issues.slice(0, 20).join("\n") : "No failed requests / 4xx/5xx responses detected."
+    });
+  }
 
   let aiSummary: string | undefined;
   if (env.enableAi && cfg.ai.enabled) {
     const prompt = buildNextActionPrompt({
       url: input.url,
       pageSummary: "Placeholder page summary (no browser yet).",
-      recentActions: ["navigate(url)"]
+      recentActions: ["navigate(url)"],
+      context: cfg.context
     });
     const out = await ollamaGenerate({ prompt, stream: false });
     aiSummary = out.response?.trim() || undefined;
@@ -44,7 +193,7 @@ export async function runOrchestrator(input: { url: string }): Promise<RunReport
   const report: RunReport = {
     runId,
     url: input.url,
-    status: "completed",
+    status: steps.some((s) => s.status === "fail") ? "failed" : "completed",
     startedAt,
     finishedAt: new Date().toISOString(),
     steps,
