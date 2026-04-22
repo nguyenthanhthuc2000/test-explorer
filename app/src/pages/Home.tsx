@@ -2,11 +2,27 @@ import React, { useMemo, useState } from "react";
 import { InputUrl } from "../components/InputUrl";
 import { RunButton } from "../components/RunButton";
 import type { RunReport } from "@core/types";
+import { qa } from "../lib/qa";
 
 export function Home(props: { onReport: (report: RunReport) => void }) {
   const [url, setUrl] = useState("https://example.com");
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const cfg = await qa().getConfig();
+        if (mounted && cfg?.targetUrl) setUrl(cfg.targetUrl);
+      } catch {
+        // ignore
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const canRun = useMemo(() => {
     try {
@@ -21,7 +37,7 @@ export function Home(props: { onReport: (report: RunReport) => void }) {
     setRunning(true);
     setError(null);
     try {
-      const report = await window.qa.runTest({ url });
+      const report = await qa().runTest({ url });
       props.onReport(report);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));

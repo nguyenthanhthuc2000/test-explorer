@@ -5,8 +5,9 @@
   "type": "module",
   "main": "dist/electron/electron/main.js",
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"npm run dev:electron:watch\" \"wait-on http://localhost:5173 && wait-on dist/electron/electron/main.js && electron dist/electron/electron/main.js\"",
-    "dev:electron:watch": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
+    "postinstall": "electron-rebuild -f -w better-sqlite3",
+    "dev": "concurrently -k \"vite\" \"npm run dev:electron:watch\" \"wait-on http://localhost:5173 && wait-on dist/electron/package.json && wait-on dist/electron/electron/main.js && wait-on dist/electron/electron/preload.js && wait-on dist/electron/electron/ipc/channels.js && electron dist/electron/electron/main.js\"",
+    "dev:electron:watch": "node scripts/write-electron-cjs-package.cjs && tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
     "build": "npm run build:renderer && npm run build:electron",
     "build:renderer": "vite build",
     "build:electron": "tsc -p tsconfig.electron.json && node scripts/write-electron-cjs-package.cjs",
@@ -16,18 +17,21 @@
     "test:pw": "playwright test"
   },
   "dependencies": {
+    "better-sqlite3": "^12.2.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.11",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.0.0",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.7.0",
     "autoprefixer": "^10.4.21",
-    "@tailwindcss/postcss": "^4.1.11",
     "concurrently": "^9.2.1",
     "electron": "^38.0.0",
+    "electron-rebuild": "^3.2.9",
     "postcss": "^8.5.6",
     "tailwindcss": "^4.1.11",
     "typescript": "^5.9.2",
