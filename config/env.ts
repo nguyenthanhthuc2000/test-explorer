@@ -1,6 +1,4 @@
 export type Env = {
-  ollamaBaseUrl: string;
-  ollamaModel: string;
   enableAi: boolean;
 };
 
@@ -10,8 +8,6 @@ function readBool(v: string | undefined, fallback: boolean) {
 }
 
 export const env: Env = {
-  ollamaBaseUrl: process.env.OLLAMA_BASE_URL ?? "http://localhost:11434",
-  ollamaModel: process.env.OLLAMA_MODEL ?? "llama3.2",
   enableAi: readBool(process.env.ENABLE_AI, false)
 };
 

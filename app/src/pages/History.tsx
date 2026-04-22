@@ -33,31 +33,36 @@ export function History(props: { onOpenRun: (id: string) => void }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [modeFilter, setModeFilter] = useState<"all" | "api" | "web">("all");
+
+  async function refresh() {
+    setLoading(true);
+    setError(null);
+    try {
+      const r = await qa().listRuns(50);
+      setRuns(r);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
 
   useEffect(() => {
-    let mounted = true;
-    (async () => {
-      setLoading(true);
-      setError(null);
-      try {
-        const r = await qa().listRuns(50);
-        if (mounted) setRuns(r);
-      } catch (e) {
-        if (mounted) setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        if (mounted) setLoading(false);
-      }
-    })();
-    return () => {
-      mounted = false;
-    };
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return runs;
-    return runs.filter((r) => (r.url + " " + r.id + " " + r.status).toLowerCase().includes(q));
-  }, [runs, query]);
+    return runs.filter((r) => {
+      const cfg = safeParseConfig(r.config_json);
+      const mode = cfg?.mode;
+      if (modeFilter !== "all" && mode && mode !== modeFilter) return false;
+      if (!q) return true;
+      return (r.url + " " + r.id + " " + r.status).toLowerCase().includes(q);
+    });
+  }, [runs, query, modeFilter]);
 
   return (
     <div className="grid gap-3">
@@ -66,14 +71,60 @@ export function History(props: { onOpenRun: (id: string) => void }) {
           <div className="text-base font-extrabold">History</div>
           <div className="text-sm text-slate-300">Danh sách runs được lưu trong SQLite.</div>
         </div>
-        <div className="grid gap-1">
-          <div className="text-xs font-bold text-slate-300">Search</div>
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            className="w-72 max-w-full rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
-            placeholder="url / run id / status"
-          />
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="grid gap-1">
+            <div className="text-xs font-bold text-slate-300">Filter mode</div>
+            <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-black/20 p-1">
+              <button
+                onClick={() => setModeFilter("all")}
+                className={[
+                  "rounded-lg px-2 py-1 text-xs font-extrabold",
+                  modeFilter === "all" ? "bg-white/15 text-slate-100" : "text-slate-300 hover:bg-white/10"
+                ].join(" ")}
+              >
+                All
+              </button>
+              <button
+                onClick={() => setModeFilter("web")}
+                className={[
+                  "rounded-lg px-2 py-1 text-xs font-extrabold",
+                  modeFilter === "web" ? "bg-white/15 text-slate-100" : "text-slate-300 hover:bg-white/10"
+                ].join(" ")}
+              >
+                UI
+              </button>
+              <button
+                onClick={() => setModeFilter("api")}
+                className={[
+                  "rounded-lg px-2 py-1 text-xs font-extrabold",
+                  modeFilter === "api" ? "bg-white/15 text-slate-100" : "text-slate-300 hover:bg-white/10"
+                ].join(" ")}
+              >
+                API
+              </button>
+            </div>
+          </div>
+          <div className="grid gap-1">
+            <div className="text-xs font-bold text-slate-300">Search</div>
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              className="w-72 max-w-full rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
+              placeholder="url / run id / status"
+            />
+          </div>
+          <button
+            onClick={async () => {
+              if (!confirm("Xoá toàn bộ history (runs/steps) trong SQLite?")) return;
+              setRuns([]);
+              const res = await qa().clearHistory();
+              console.log("clearHistory:", res);
+              await refresh();
+            }}
+            className="rounded-xl bg-red-400 px-3 py-2 text-sm font-extrabold text-slate-950 hover:bg-red-300"
+          >
+            Clear all
+          </button>
         </div>
       </div>
 
@@ -114,6 +165,11 @@ export function History(props: { onOpenRun: (id: string) => void }) {
                 </div>
 
                 <div className="flex items-center gap-2">
+                  {cfg?.mode ? (
+                    <span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-extrabold text-slate-200">
+                      {cfg.mode.toUpperCase()}
+                    </span>
+                  ) : null}
                   {cfg?.ai.enabled ? (
                     <span className="rounded-full bg-fuchsia-300 px-2 py-0.5 text-[11px] font-extrabold text-slate-950">
                       AI

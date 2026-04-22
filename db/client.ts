@@ -15,6 +15,7 @@ export function initDb(opts: DbInitOptions) {
   const dbPath = path.join(opts.userDataDir, "ai-qa.sqlite");
   db = new Database(dbPath);
   db.pragma("journal_mode = WAL");
+  db.pragma("foreign_keys = ON");
   applySchema(db);
   return db;
 }

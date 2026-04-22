@@ -1,6 +1,6 @@
 import { env } from "../config/env";
 import { ollamaGenerate } from "../ai/ollama";
-import { buildNextActionPrompt } from "../ai/prompt";
+import { buildNextActionPrompt, buildTestScenariosPrompt } from "../ai/prompt";
 import type { RunReport } from "./types";
 import { getConfig } from "../db/repository/config.repo";
 import { insertRun } from "../db/repository/run.repo";
@@ -155,6 +155,67 @@ export async function runOrchestrator(input: { url: string }): Promise<RunReport
     }
   }
 
+  // AI scenarios (optional): generate a bounded test plan.
+  if (env.enableAi && cfg.ai.enabled) {
+    const maxScenarios = Math.max(1, Math.min(30, Math.trunc(cfg.ai.maxScenarios ?? 5)));
+    try {
+      if ((cfg.ai.provider ?? "ollama") !== "ollama") {
+        throw new Error("Hiện tại chỉ hỗ trợ AI provider: Ollama.");
+      }
+      const baseUrl = (cfg.ai.baseUrl ?? "").trim();
+      if (!baseUrl) throw new Error("Chưa nhập Ollama Base URL trong Config.");
+      const model = (cfg.ai.model ?? "").trim();
+      if (!model) throw new Error("Chưa cấu hình Ollama model.");
+
+      const prompt = buildTestScenariosPrompt({
+        url: input.url,
+        context: cfg.context,
+        enabledModules: modules.map((m) => moduleLabels[m]),
+        maxScenarios,
+        scenarioHint: cfg.ai.scenarioHint
+      });
+      const out = await ollamaGenerate({
+        baseUrl,
+        model,
+        prompt,
+        stream: false
+      });
+      const raw = out.response?.trim() ?? "";
+
+      const jsonStart = raw.indexOf("{");
+      const jsonEnd = raw.lastIndexOf("}");
+      const jsonText = jsonStart >= 0 && jsonEnd >= 0 ? raw.slice(jsonStart, jsonEnd + 1) : "";
+      const parsed = jsonText ? (JSON.parse(jsonText) as { scenarios?: Array<{ title?: string; goal?: string; steps?: string[]; assertions?: string[] }> }) : null;
+      const scenarios = parsed?.scenarios ?? [];
+
+      steps.push({
+        id: newId(),
+        title: "AI scenarios (plan)",
+        status: scenarios.length ? "info" : "fail",
+        details: scenarios.length
+          ? scenarios
+              .slice(0, maxScenarios)
+              .map((s, i) => {
+                const lines: string[] = [];
+                lines.push(`${i + 1}. ${s.title ?? "Untitled"}`);
+                if (s.goal) lines.push(`   Goal: ${s.goal}`);
+                if (s.steps?.length) lines.push(...s.steps.slice(0, 12).map((x) => `   - ${x}`));
+                if (s.assertions?.length) lines.push(...s.assertions.slice(0, 10).map((x) => `   Assert: ${x}`));
+                return lines.join("\n");
+              })
+              .join("\n\n")
+          : "AI không trả về JSON scenarios hợp lệ."
+      });
+    } catch (e) {
+      steps.push({
+        id: newId(),
+        title: "AI scenarios (plan)",
+        status: "fail",
+        details: e instanceof Error ? e.message : String(e)
+      });
+    }
+  }
+
   // Build per-module steps (some are real, some placeholders).
   steps.push(...buildModuleSteps(cfg));
 
@@ -180,14 +241,36 @@ export async function runOrchestrator(input: { url: string }): Promise<RunReport
 
   let aiSummary: string | undefined;
   if (env.enableAi && cfg.ai.enabled) {
-    const prompt = buildNextActionPrompt({
-      url: input.url,
-      pageSummary: "Placeholder page summary (no browser yet).",
-      recentActions: ["navigate(url)"],
-      context: cfg.context
-    });
-    const out = await ollamaGenerate({ prompt, stream: false });
-    aiSummary = out.response?.trim() || undefined;
+    try {
+      if ((cfg.ai.provider ?? "ollama") !== "ollama") {
+        throw new Error("Hiện tại chỉ hỗ trợ AI provider: Ollama.");
+      }
+      const baseUrl = (cfg.ai.baseUrl ?? "").trim();
+      if (!baseUrl) throw new Error("Chưa nhập Ollama Base URL trong Config.");
+      const model = (cfg.ai.model ?? "").trim();
+      if (!model) throw new Error("Chưa cấu hình Ollama model.");
+
+      const prompt = buildNextActionPrompt({
+        url: input.url,
+        pageSummary: "Placeholder page summary (no browser yet).",
+        recentActions: ["navigate(url)"],
+        context: cfg.context
+      });
+      const out = await ollamaGenerate({
+        baseUrl,
+        model,
+        prompt,
+        stream: false
+      });
+      aiSummary = out.response?.trim() || undefined;
+    } catch (e) {
+      steps.push({
+        id: newId(),
+        title: "AI summary",
+        status: "fail",
+        details: e instanceof Error ? e.message : String(e)
+      });
+    }
   }
 
   const report: RunReport = {

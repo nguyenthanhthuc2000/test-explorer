@@ -41,3 +41,20 @@ export function getRun(id: string): RunRow | null {
   return row ?? null;
 }
 
+export function clearAllHistory() {
+  const db = getDb();
+  const tx = db.transaction(() => {
+    const stepsDeleted = db.prepare("DELETE FROM steps").run().changes;
+    const runsDeleted = db.prepare("DELETE FROM runs").run().changes;
+    return { runsDeleted, stepsDeleted };
+  });
+  return tx();
+}
+
+export function countHistory() {
+  const db = getDb();
+  const runs = (db.prepare("SELECT COUNT(1) as c FROM runs").get() as { c: number }).c;
+  const steps = (db.prepare("SELECT COUNT(1) as c FROM steps").get() as { c: number }).c;
+  return { runs, steps };
+}
+
