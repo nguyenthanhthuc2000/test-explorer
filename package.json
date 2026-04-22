@@ -1,0 +1,37 @@
+{
+  "name": "ai-qa-tool",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "main": "dist/electron/electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"npm run dev:electron:watch\" \"wait-on http://localhost:5173 && wait-on dist/electron/electron/main.js && electron dist/electron/electron/main.js\"",
+    "dev:electron:watch": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
+    "build": "npm run build:renderer && npm run build:electron",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p tsconfig.electron.json && node scripts/write-electron-cjs-package.cjs",
+    "preview": "vite preview",
+    "lint": "eslint .",
+    "test:pw:install": "playwright install",
+    "test:pw": "playwright test"
+  },
+  "dependencies": {
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.7.0",
+    "autoprefixer": "^10.4.21",
+    "@tailwindcss/postcss": "^4.1.11",
+    "concurrently": "^9.2.1",
+    "electron": "^38.0.0",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.11",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.0",
+    "wait-on": "^9.0.0"
+  }
+}
