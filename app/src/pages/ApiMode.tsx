@@ -134,7 +134,9 @@ function normalizeTab(t: any, fallbackName: string): ApiRequestTab {
 }
 
 export function ApiMode() {
-  const [activePanel, setActivePanel] = useState<"params" | "context" | "authorization" | "headers" | "body">("params");
+  const [activePanel, setActivePanel] = useState<
+    "params" | "context" | "authorization" | "headers" | "body" | "advanced"
+  >("params");
   const [importOpen, setImportOpen] = useState(false);
   const [importKind, setImportKind] = useState<ImportKind>("curl");
   const [importText, setImportText] = useState("");
@@ -144,6 +146,8 @@ export function ApiMode() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [folderMenuPath, setFolderMenuPath] = useState<string | null>(null);
   const [requestMenuId, setRequestMenuId] = useState<string | null>(null);
+  const [renameRequestId, setRenameRequestId] = useState<string | null>(null);
+  const [renameRequestDraft, setRenameRequestDraft] = useState<string>("");
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [newFolderPath, setNewFolderPath] = useState("api");
   const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
@@ -228,14 +232,6 @@ export function ApiMode() {
     tabId: "",
     mode: "raw"
   });
-  const [advancedOpen, setAdvancedOpen] = useState<boolean>(() => {
-    try {
-      const raw = localStorage.getItem("ai-qa.api.advancedOpen.v1");
-      return raw ? Boolean(JSON.parse(raw)) : false;
-    } catch {
-      return false;
-    }
-  });
   const [genLoading, setGenLoading] = useState(false);
   const [scenarioLimit, setScenarioLimit] = useState<number>(5);
   const [scenarioRunLoading, setScenarioRunLoading] = useState(false);
@@ -285,14 +281,6 @@ export function ApiMode() {
       clearInterval(t);
     };
   }, []);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem("ai-qa.api.advancedOpen.v1", JSON.stringify(Boolean(advancedOpen)));
-    } catch {
-      // ignore
-    }
-  }, [advancedOpen]);
 
   useEffect(() => {
     // Persist per-tab response/log history
@@ -658,6 +646,20 @@ export function ApiMode() {
     }));
   }
 
+  function renameTab(tabId: string, nextName: string) {
+    const name = String(nextName ?? "").trim();
+    if (!name) return;
+    setTabsState((s) => ({
+      ...s,
+      tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, name } : t))
+    }));
+    try {
+      persistTabs();
+    } catch {
+      // ignore
+    }
+  }
+
   function setActiveRequestId(nextId: string) {
     setTabsState((s) => ({ ...s, activeRequestId: nextId }));
   }
@@ -718,7 +720,6 @@ export function ApiMode() {
 
   // Alias current tab fields to keep JSX simple
   const tabName = safeActiveReq.name;
-  const tabFolder = safeActiveReq.folder;
   const method = safeActiveReq.method;
   const url = safeActiveReq.url;
   const apiContext = safeActiveReq.context;
@@ -741,8 +742,7 @@ export function ApiMode() {
   const activeTab = activePanel;
   const setActiveTab = setActivePanel;
 
-  const setTabName = (v: string) => updateActive((t) => ({ ...t, name: v }));
-  const setTabFolder = (v: string) => updateActive((t) => ({ ...t, folder: v }));
+  // Name/Folder are edited from sidebar menu now
   const setMethod = (m: HttpMethod) => updateActive((t) => ({ ...t, method: m }));
   const setUrl = (u: string) => updateActive((t) => ({ ...t, url: u }));
   const setApiContext = (v: string) => updateActive((t) => ({ ...t, context: v }));
@@ -1176,24 +1176,17 @@ export function ApiMode() {
             setMenuOpen(false);
             setFolderMenuPath(null);
             setRequestMenuId(null);
+            setRenameRequestId(null);
           }}
         />
       ) : null}
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <div className="text-base font-extrabold">API test mode</div>
-          <div className="text-sm text-slate-300">Gửi request và validate theo điều kiện (MVP).</div>
-        </div>
-        <div />
-      </div>
-
       {importOpen ? (
         <div
-          className="fixed inset-0 z-50 bg-black/70"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
           onMouseDown={() => setImportOpen(false)}
         >
           <div
-            className="fixed left-1/2 top-1/2 w-[min(880px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-(--border) bg-slate-950 p-4 shadow-2xl"
+            className="w-[min(880px,calc(100vw-2rem))] max-h-[calc(100vh-2rem)] overflow-hidden rounded-2xl border border-(--border) bg-slate-950 p-4 shadow-2xl"
             onMouseDown={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between gap-2">
@@ -1206,7 +1199,7 @@ export function ApiMode() {
               </button>
             </div>
 
-            <div className="mt-3 grid max-h-[80vh] gap-2 overflow-auto pr-1 [scrollbar-gutter:stable]">
+            <div className="mt-3 grid max-h-[calc(100vh-9rem)] gap-2 overflow-auto pr-1 [scrollbar-gutter:stable]">
             <div className="grid gap-2 md:grid-cols-[220px_1fr]">
               <label className="grid gap-1">
                 <div className="text-xs font-bold text-slate-300">Nguồn import</div>
@@ -1386,11 +1379,11 @@ export function ApiMode() {
 
       {newFolderOpen ? (
         <div
-          className="fixed inset-0 z-50 bg-black/70"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
           onMouseDown={() => setNewFolderOpen(false)}
         >
           <div
-            className="fixed left-1/2 top-1/2 w-[min(520px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-(--border) bg-slate-950 p-4 shadow-2xl"
+            className="w-[min(520px,calc(100vw-2rem))] max-h-[calc(100vh-2rem)] overflow-hidden rounded-2xl border border-(--border) bg-slate-950 p-4 shadow-2xl"
             onMouseDown={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between gap-2">
@@ -1449,11 +1442,11 @@ export function ApiMode() {
 
       {preview.open ? (
         <div
-          className="fixed inset-0 z-60 bg-black/70"
+          className="fixed inset-0 z-60 flex items-center justify-center bg-black/70 p-4"
           onMouseDown={() => setPreview((p) => ({ ...p, open: false }))}
         >
           <div
-            className="fixed left-1/2 top-1/2 w-[min(980px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-(--border) bg-slate-950 p-4 shadow-2xl"
+            className="w-[min(980px,calc(100vw-2rem))] max-h-[calc(100vh-2rem)] overflow-hidden rounded-2xl border border-(--border) bg-slate-950 p-4 shadow-2xl"
             onMouseDown={(e) => e.stopPropagation()}
           >
             <div className="mb-3 flex items-center justify-between gap-2">
@@ -1504,7 +1497,7 @@ export function ApiMode() {
             </div>
 
             {preview.mode === "html" ? (
-              <div className="h-[60vh] overflow-hidden rounded-xl border border-white/10 bg-black/30">
+              <div className="h-[min(60vh,calc(100vh-14rem))] overflow-hidden rounded-xl border border-white/10 bg-black/30">
                 <iframe
                   title="html-preview"
                   sandbox=""
@@ -1513,7 +1506,7 @@ export function ApiMode() {
                 />
               </div>
             ) : (
-              <pre className="max-h-[60vh] overflow-auto rounded-xl border border-white/10 bg-black/30 p-3 text-xs text-slate-100">
+              <pre className="max-h-[min(60vh,calc(100vh-14rem))] overflow-auto rounded-xl border border-white/10 bg-black/30 p-3 text-xs text-slate-100">
                 {preview.mode === "json"
                   ? previewJson ?? "Body không phải JSON hợp lệ để preview."
                   : previewBody}
@@ -1524,9 +1517,12 @@ export function ApiMode() {
       ) : null}
 
       {reqBodyPreview.open ? (
-        <div className="fixed inset-0 z-60 bg-black/70" onMouseDown={() => setReqBodyPreview((p) => ({ ...p, open: false }))}>
+        <div
+          className="fixed inset-0 z-60 flex items-center justify-center bg-black/70 p-4"
+          onMouseDown={() => setReqBodyPreview((p) => ({ ...p, open: false }))}
+        >
           <div
-            className="fixed left-1/2 top-1/2 w-[min(980px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-(--border) bg-slate-950 p-4 shadow-2xl"
+            className="w-[min(980px,calc(100vw-2rem))] max-h-[calc(100vh-2rem)] overflow-hidden rounded-2xl border border-(--border) bg-slate-950 p-4 shadow-2xl"
             onMouseDown={(e) => e.stopPropagation()}
           >
             <div className="mb-3 flex items-center justify-between gap-2">
@@ -1554,7 +1550,7 @@ export function ApiMode() {
                 </button>
               </div>
             </div>
-            <pre className="max-h-[70vh] overflow-auto rounded-xl border border-white/10 bg-black/30 p-3 text-xs font-bold text-slate-100 whitespace-pre-wrap wrap-break-word">
+            <pre className="max-h-[calc(100vh-10rem)] overflow-auto rounded-xl border border-white/10 bg-black/30 p-3 text-xs font-bold text-slate-100 whitespace-pre-wrap wrap-break-word">
               {reqBodyPreview.body ?? ""}
             </pre>
           </div>
@@ -1562,9 +1558,12 @@ export function ApiMode() {
       ) : null}
 
       {scenarioModalOpen ? (
-        <div className="fixed inset-0 z-60 bg-black/70" onMouseDown={() => setScenarioModalOpen(false)}>
+        <div
+          className="fixed inset-0 z-60 flex items-center justify-center bg-black/70 p-4"
+          onMouseDown={() => setScenarioModalOpen(false)}
+        >
           <div
-            className="fixed left-1/2 top-1/2 w-[min(980px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-(--border) bg-slate-950 p-4 shadow-2xl"
+            className="w-[min(980px,calc(100vw-2rem))] max-h-[calc(100vh-2rem)] overflow-hidden rounded-2xl border border-(--border) bg-slate-950 p-4 shadow-2xl"
             onMouseDown={(e) => e.stopPropagation()}
           >
             <div className="mb-3 flex items-center justify-between gap-2">
@@ -2093,6 +2092,56 @@ export function ApiMode() {
                       <button
                         type="button"
                         onClick={() => {
+                          setRenameRequestId(t.id);
+                          setRenameRequestDraft(t.name ?? "");
+                        }}
+                        className="w-full px-3 py-2 text-left text-xs font-extrabold text-(--app-fg) hover:bg-(--btn)"
+                      >
+                        Rename
+                      </button>
+                      {renameRequestId === t.id ? (
+                        <div className="grid gap-2 border-t border-(--border) bg-(--surface) p-3">
+                          <input
+                            value={renameRequestDraft}
+                            onChange={(e) => setRenameRequestDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                renameTab(t.id, renameRequestDraft);
+                                setRenameRequestId(null);
+                                setRequestMenuId(null);
+                              } else if (e.key === "Escape") {
+                                setRenameRequestId(null);
+                              }
+                            }}
+                            className="w-full rounded-lg border border-(--border) bg-(--surface-2) px-3 py-2 text-xs font-bold text-(--app-fg) outline-none placeholder:text-(--muted) focus:border-(--btn-hover)"
+                            placeholder="New name"
+                            autoFocus
+                          />
+                          <div className="flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setRenameRequestId(null)}
+                              className="rounded-lg bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                renameTab(t.id, renameRequestDraft);
+                                setRenameRequestId(null);
+                                setRequestMenuId(null);
+                              }}
+                              className="rounded-lg bg-blue-500 px-3 py-1.5 text-[11px] font-extrabold text-white hover:bg-blue-400"
+                            >
+                              Save
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => {
                           closeTab(t.id);
                           setRequestMenuId(null);
                         }}
@@ -2353,27 +2402,6 @@ export function ApiMode() {
 
         {/* Main editor */}
         <div className="grid gap-3 rounded-2xl border border-(--border) bg-(--surface) p-4">
-        <div className="grid gap-2 md:grid-cols-2">
-          <label className="grid gap-1">
-            <div className="text-xs font-bold text-slate-300">Name</div>
-            <input
-              value={tabName}
-              onChange={(e) => setTabName(e.target.value)}
-              className="rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
-              placeholder="Request name"
-            />
-          </label>
-          <label className="grid gap-1">
-            <div className="text-xs font-bold text-slate-300">Folder</div>
-            <input
-              value={tabFolder}
-              onChange={(e) => setTabFolder(e.target.value)}
-              className="rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
-              placeholder="e.g. api/auth"
-            />
-          </label>
-        </div>
-
         <div className="grid gap-2 md:grid-cols-[140px_1fr_auto]">
           <label className="grid gap-1">
             <div className="text-xs font-bold text-slate-300">Method</div>
@@ -2461,11 +2489,22 @@ export function ApiMode() {
               Body
               {activeTab === "body" ? <span className="absolute inset-x-0 bottom-0 h-0.5 bg-blue-400" /> : null}
             </button>
+            <button
+              onClick={() => setActiveTab("advanced")}
+              className={[
+                "relative -mb-px px-1 py-2 text-sm font-extrabold",
+                activeTab === "advanced" ? "text-slate-100" : "text-slate-300 hover:text-slate-200"
+              ].join(" ")}
+            >
+              Advanced
+              {activeTab === "advanced" ? <span className="absolute inset-x-0 bottom-0 h-0.5 bg-blue-400" /> : null}
+            </button>
           </div>
         </div>
 
+        <div className="min-h-[320px]">
         {activeTab === "params" ? (
-          <div className="grid gap-1">
+          <div className="grid gap-2 rounded-xl border border-white/10 bg-black/20 p-3">
             <div className="flex items-center justify-between gap-2">
               <div className="text-xs font-bold text-slate-300">Query params</div>
               <button
@@ -2475,49 +2514,47 @@ export function ApiMode() {
                 + Add
               </button>
             </div>
-            <div className="rounded-xl border border-white/10 bg-black/20 p-3">
-              <div className="grid max-h-[40vh] gap-2 overflow-auto pr-1 [scrollbar-gutter:stable] md:max-h-[calc(100vh-520px)]">
-                {paramRows.map((r) => (
-                  <div key={r.id} className="grid grid-cols-[28px_1fr_1fr_40px] gap-2">
-                  <label className="grid place-items-center">
-                    <input
-                      type="checkbox"
-                      checked={r.enabled !== false}
-                      onChange={(e) =>
-                        setParamRows((p) => p.map((x) => (x.id === r.id ? { ...x, enabled: e.target.checked } : x)))
-                      }
-                      title="Use this param when sending"
-                    />
-                  </label>
+            <div className="grid max-h-[40vh] gap-2 overflow-auto pr-1 [scrollbar-gutter:stable] md:max-h-[calc(100vh-520px)]">
+              {paramRows.map((r) => (
+                <div key={r.id} className="grid grid-cols-[28px_1fr_1fr_40px] gap-2">
+                <label className="grid place-items-center">
                   <input
-                    value={r.key}
+                    type="checkbox"
+                    checked={r.enabled !== false}
                     onChange={(e) =>
-                      setParamRows((p) => p.map((x) => (x.id === r.id ? { ...x, key: e.target.value } : x)))
+                      setParamRows((p) => p.map((x) => (x.id === r.id ? { ...x, enabled: e.target.checked } : x)))
                     }
-                    className="rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
-                    placeholder="Param name"
+                    title="Use this param when sending"
                   />
-                  <input
-                    value={r.value}
-                    onChange={(e) =>
-                      setParamRows((p) => p.map((x) => (x.id === r.id ? { ...x, value: e.target.value } : x)))
-                    }
-                    className="rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
-                    placeholder="Param value"
-                  />
-                  <button
-                    onClick={() => setParamRows((p) => p.filter((x) => x.id !== r.id))}
-                    className="rounded-lg bg-white/10 text-sm font-extrabold text-slate-200 hover:bg-white/15"
-                    title="Remove param"
-                  >
-                    ×
-                  </button>
-                  </div>
-                ))}
-              </div>
-              <div className="text-xs text-slate-400">
-                URL: <span className="text-slate-200">{finalUrl}</span>
-              </div>
+                </label>
+                <input
+                  value={r.key}
+                  onChange={(e) =>
+                    setParamRows((p) => p.map((x) => (x.id === r.id ? { ...x, key: e.target.value } : x)))
+                  }
+                  className="rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
+                  placeholder="Param name"
+                />
+                <input
+                  value={r.value}
+                  onChange={(e) =>
+                    setParamRows((p) => p.map((x) => (x.id === r.id ? { ...x, value: e.target.value } : x)))
+                  }
+                  className="rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
+                  placeholder="Param value"
+                />
+                <button
+                  onClick={() => setParamRows((p) => p.filter((x) => x.id !== r.id))}
+                  className="rounded-lg bg-white/10 text-sm font-extrabold text-slate-200 hover:bg-white/15"
+                  title="Remove param"
+                >
+                  ×
+                </button>
+                </div>
+              ))}
+            </div>
+            <div className="text-xs text-slate-400">
+              URL: <span className="text-slate-200">{finalUrl}</span>
             </div>
           </div>
         ) : activeTab === "context" ? (
@@ -2649,6 +2686,124 @@ export function ApiMode() {
               {headerRows.length === 0 ? <div className="text-xs text-slate-400">No headers</div> : null}
             </div>
           </div>
+        ) : activeTab === "advanced" ? (
+          <div className="grid content-start gap-3">
+            <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+              <div className="mb-2 text-xs font-extrabold text-slate-200">Advanced</div>
+              <div className="grid gap-2 md:grid-cols-3">
+                <label className="grid gap-1">
+                  <div className="text-[11px] font-bold text-slate-300">Expect status</div>
+                  <input
+                    type="number"
+                    value={expectStatus}
+                    onChange={(e) => setExpectStatus(Number(e.target.value))}
+                    className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-100 outline-none focus:border-white/20"
+                  />
+                </label>
+                <label className="grid gap-1">
+                  <div className="text-[11px] font-bold text-slate-300">Max time (ms)</div>
+                  <input
+                    type="number"
+                    value={maxMs}
+                    onChange={(e) => setMaxMs(Number(e.target.value))}
+                    className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-100 outline-none focus:border-white/20"
+                  />
+                </label>
+                <label className="grid gap-1">
+                  <div className="text-[11px] font-bold text-slate-300">Timeout (ms)</div>
+                  <input
+                    type="number"
+                    value={timeoutMs}
+                    onChange={(e) => setTimeoutMs(Number(e.target.value))}
+                    className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/20"
+                    placeholder="5000"
+                  />
+                </label>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
+                  <input type="checkbox" checked={insecureTls} onChange={(e) => setInsecureTls(e.target.checked)} />
+                  Ignore TLS errors (self-signed) (dev)
+                </label>
+
+                <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
+                  <input type="checkbox" checked={useCookieJar} onChange={(e) => setUseCookieJar(e.target.checked)} />
+                  Cookie jar
+                </label>
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await qa().clearCookies();
+                      setTabRuns((p) => ({ ...p, [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: null } }));
+                    } catch (e) {
+                      setTabRuns((p) => ({
+                        ...p,
+                        [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: e instanceof Error ? e.message : String(e) }
+                      }));
+                    }
+                  }}
+                  className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                >
+                  Clear cookies
+                </button>
+
+                <button
+                  type="button"
+                  onClick={clearLogs}
+                  className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                >
+                  Clear logs
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+              <div className="mb-2 text-xs font-extrabold text-slate-200">Scenarios</div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={generateScenarios}
+                  disabled={genLoading}
+                  className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover) disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {genLoading ? "Generating..." : (scenariosByTabId[safeActiveReq.id]?.length ? "Sửa kịch bản" : "Tạo kịch bản test")}
+                </button>
+                <div className="text-[11px] font-bold text-slate-400">
+                  Saved: <span className="text-slate-200">{scenariosByTabId[safeActiveReq.id]?.length ?? 0}</span>
+                </div>
+                <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
+                  Limit
+                  <input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={scenarioLimit}
+                    onChange={(e) => setScenarioLimit(Number(e.target.value))}
+                    className="w-20 rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-[11px] font-extrabold text-slate-100 outline-none focus:border-white/20"
+                  />
+                </label>
+                <button
+                  onClick={runAllScenarios}
+                  disabled={scenarioRunLoading || !(scenariosByTabId[safeActiveReq.id]?.length)}
+                  className="rounded-xl bg-emerald-400 px-3 py-2 text-[11px] font-extrabold text-slate-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {scenarioRunLoading ? "Running..." : "Chạy tất cả kịch bản test"}
+                </button>
+                {scenarioRunLoading ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      scenarioCancelRef.current.cancel = true;
+                    }}
+                    className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                  >
+                    Cancel
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </div>
         ) : (
           <div className="grid gap-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2777,165 +2932,6 @@ export function ApiMode() {
             )}
           </div>
         )}
-
-        <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
-          <button
-            type="button"
-            onClick={() => setAdvancedOpen((v) => !v)}
-            className="flex w-full items-center justify-between gap-3 rounded-xl bg-black/20 px-3 py-2 text-left"
-          >
-            <div className="text-xs font-extrabold text-slate-200">Advanced (AI Testing / TLS / Cookies / Scenarios)</div>
-            <div className="text-[11px] font-bold text-slate-400">{advancedOpen ? "Hide" : "Show"}</div>
-          </button>
-
-          {!advancedOpen ? (
-            <div className="mt-2 flex flex-wrap items-center gap-2">
-              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
-                <span className="text-slate-300">Expect</span>
-                <span className="text-slate-100">{expectStatus}</span>
-                <span className="text-slate-500">•</span>
-                <span className="text-slate-300">Max</span>
-                <span className="text-slate-100">{maxMs}ms</span>
-                <span className="text-slate-500">•</span>
-                <span className="text-slate-300">Timeout</span>
-                <span className="text-slate-100">{timeoutMs}ms</span>
-              </div>
-              <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
-                <input type="checkbox" checked={insecureTls} onChange={(e) => setInsecureTls(e.target.checked)} />
-                TLS ignore
-              </label>
-              <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
-                <input type="checkbox" checked={useCookieJar} onChange={(e) => setUseCookieJar(e.target.checked)} />
-                Cookie jar
-              </label>
-              <button
-                type="button"
-                onClick={clearLogs}
-                className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
-              >
-                Clear logs
-              </button>
-              <button
-                type="button"
-                onClick={() => openAndScrollToResponse(safeActiveReq.id)}
-                className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
-              >
-                Jump to logs
-              </button>
-            </div>
-          ) : (
-            <div className="mt-3 grid gap-2">
-              <div className="grid gap-2 md:grid-cols-3">
-                <label className="grid gap-1">
-                  <div className="text-[11px] font-bold text-slate-300">Expect status</div>
-                  <input
-                    type="number"
-                    value={expectStatus}
-                    onChange={(e) => setExpectStatus(Number(e.target.value))}
-                    className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-100 outline-none focus:border-white/20"
-                  />
-                </label>
-                <label className="grid gap-1">
-                  <div className="text-[11px] font-bold text-slate-300">Max time (ms)</div>
-                  <input
-                    type="number"
-                    value={maxMs}
-                    onChange={(e) => setMaxMs(Number(e.target.value))}
-                    className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-100 outline-none focus:border-white/20"
-                  />
-                </label>
-                <label className="grid gap-1">
-                  <div className="text-[11px] font-bold text-slate-300">Timeout (ms)</div>
-                  <input
-                    type="number"
-                    value={timeoutMs}
-                    onChange={(e) => setTimeoutMs(Number(e.target.value))}
-                    className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/20"
-                    placeholder="5000"
-                  />
-                </label>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
-                  <input type="checkbox" checked={insecureTls} onChange={(e) => setInsecureTls(e.target.checked)} />
-                  Ignore TLS errors (self-signed) (dev)
-                </label>
-
-                <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
-                  <input type="checkbox" checked={useCookieJar} onChange={(e) => setUseCookieJar(e.target.checked)} />
-                  Cookie jar
-                </label>
-
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      await qa().clearCookies();
-                      setTabRuns((p) => ({ ...p, [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: null } }));
-                    } catch (e) {
-                      setTabRuns((p) => ({
-                        ...p,
-                        [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: e instanceof Error ? e.message : String(e) }
-                      }));
-                    }
-                  }}
-                  className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
-                >
-                  Clear cookies
-                </button>
-
-                <button
-                  type="button"
-                  onClick={clearLogs}
-                  className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
-                >
-                  Clear logs
-                </button>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  onClick={generateScenarios}
-                  disabled={genLoading}
-                  className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover) disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {genLoading ? "Generating..." : (scenariosByTabId[safeActiveReq.id]?.length ? "Sửa kịch bản" : "Tạo kịch bản test")}
-                </button>
-                <div className="text-[11px] font-bold text-slate-400">
-                  Saved: <span className="text-slate-200">{scenariosByTabId[safeActiveReq.id]?.length ?? 0}</span>
-                </div>
-                <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
-                  Limit
-                  <input
-                    type="number"
-                    min={1}
-                    max={30}
-                    value={scenarioLimit}
-                    onChange={(e) => setScenarioLimit(Number(e.target.value))}
-                    className="w-20 rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-[11px] font-extrabold text-slate-100 outline-none focus:border-white/20"
-                  />
-                </label>
-                <button
-                  onClick={runAllScenarios}
-                  disabled={scenarioRunLoading || !(scenariosByTabId[safeActiveReq.id]?.length)}
-                  className="rounded-xl bg-emerald-400 px-3 py-2 text-[11px] font-extrabold text-slate-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {scenarioRunLoading ? "Running..." : "Chạy tất cả kịch bản test"}
-                </button>
-                {scenarioRunLoading ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      scenarioCancelRef.current.cancel = true;
-                    }}
-                    className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
-                  >
-                    Cancel
-                  </button>
-                ) : null}
-              </div>
-            </div>
-          )}
         </div>
         </div>
       </div>
@@ -3078,8 +3074,8 @@ export function ApiMode() {
 
                 {/* Right: detail */}
                 {selectedEntry ? (
-                  <div className="max-h-[52vh] overflow-y-auto overflow-x-hidden rounded-xl border border-white/10 bg-black/20 p-3">
-                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex max-h-[52vh] min-h-0 flex-col overflow-hidden rounded-xl border border-white/10 bg-black/20 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2">
                       <div className="text-xs font-extrabold text-slate-200">Detail</div>
                       <div className="flex flex-wrap gap-2">
                         <button
@@ -3126,63 +3122,65 @@ export function ApiMode() {
                       </div>
                     </div>
 
-                    <div className="mb-3 text-[11px] font-bold text-slate-300">
-                      <span className="text-slate-400">At:</span> {formatAtNoTz(selectedEntry.at)}
-                    </div>
+                    <div className="mt-2 min-h-0 flex-1 overflow-y-auto overflow-x-hidden pr-1 [scrollbar-gutter:stable]">
+                      <div className="mb-3 text-[11px] font-bold text-slate-300">
+                        <span className="text-slate-400">At:</span> {formatAtNoTz(selectedEntry.at)}
+                      </div>
 
-                    {selectedEntry?.request?.bodyText ? (
-                      <div className="mb-3 rounded-xl border border-white/10 bg-black/20 p-3">
-                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                          <div className="text-xs font-extrabold text-slate-200">Request body</div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setReqBodyPreview({
-                                  open: true,
-                                  title: `${String(selectedEntry.method ?? "")} ${String(selectedEntry.url ?? "")}`.trim(),
-                                  body: String(selectedEntry.request?.bodyText ?? "")
-                                })
-                              }
-                              className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
-                            >
-                              View full
-                            </button>
+                      {selectedEntry?.request?.bodyText ? (
+                        <div className="mb-3 rounded-xl border border-white/10 bg-black/20 p-3">
+                          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                            <div className="text-xs font-extrabold text-slate-200">Request body</div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setReqBodyPreview({
+                                    open: true,
+                                    title: `${String(selectedEntry.method ?? "")} ${String(selectedEntry.url ?? "")}`.trim(),
+                                    body: String(selectedEntry.request?.bodyText ?? "")
+                                  })
+                                }
+                                className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                              >
+                                View full
+                              </button>
+                            </div>
+                          </div>
+                          <pre className="max-h-56 overflow-y-auto overflow-x-hidden rounded-lg border border-white/10 bg-black/30 p-2 text-[11px] font-bold text-slate-100 whitespace-pre-wrap wrap-break-word">
+                            {String(selectedEntry.request?.bodyText ?? "")}
+                          </pre>
+                        </div>
+                      ) : null}
+
+                      {Array.isArray(selectedEntry?.result?.validations) && selectedEntry.result.validations.length ? (
+                        <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                          <div className="mb-2 text-xs font-extrabold text-slate-200">Validations</div>
+                          <div className="grid gap-1">
+                            {selectedEntry.result.validations.map((v: any, i: number) => (
+                              <div key={i} className="rounded-lg border border-white/10 bg-black/20 px-2 py-1.5">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="text-[11px] font-extrabold text-slate-100">{String(v?.name ?? `#${i + 1}`)}</div>
+                                  <span
+                                    className={[
+                                      "rounded-full px-2 py-0.5 text-[11px] font-extrabold",
+                                      v?.ok ? "bg-emerald-300 text-slate-950" : "bg-red-400 text-slate-950"
+                                    ].join(" ")}
+                                  >
+                                    {v?.ok ? "PASS" : "FAIL"}
+                                  </span>
+                                </div>
+                                {v?.details ? (
+                                  <div className="mt-1 text-[11px] font-bold text-slate-400">{String(v.details)}</div>
+                                ) : null}
+                              </div>
+                            ))}
                           </div>
                         </div>
-                        <pre className="max-h-56 overflow-y-auto overflow-x-hidden rounded-lg border border-white/10 bg-black/30 p-2 text-[11px] font-bold text-slate-100 whitespace-pre-wrap wrap-break-word">
-                          {String(selectedEntry.request?.bodyText ?? "")}
-                        </pre>
-                      </div>
-                    ) : null}
-
-                    {Array.isArray(selectedEntry?.result?.validations) && selectedEntry.result.validations.length ? (
-                      <div className="rounded-xl border border-white/10 bg-black/20 p-3">
-                        <div className="mb-2 text-xs font-extrabold text-slate-200">Validations</div>
-                        <div className="grid gap-1">
-                          {selectedEntry.result.validations.map((v: any, i: number) => (
-                            <div key={i} className="rounded-lg border border-white/10 bg-black/20 px-2 py-1.5">
-                              <div className="flex flex-wrap items-center justify-between gap-2">
-                                <div className="text-[11px] font-extrabold text-slate-100">{String(v?.name ?? `#${i + 1}`)}</div>
-                                <span
-                                  className={[
-                                    "rounded-full px-2 py-0.5 text-[11px] font-extrabold",
-                                    v?.ok ? "bg-emerald-300 text-slate-950" : "bg-red-400 text-slate-950"
-                                  ].join(" ")}
-                                >
-                                  {v?.ok ? "PASS" : "FAIL"}
-                                </span>
-                              </div>
-                              {v?.details ? (
-                                <div className="mt-1 text-[11px] font-bold text-slate-400">{String(v.details)}</div>
-                              ) : null}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="text-[11px] font-bold text-(--muted)">Không có validations.</div>
-                    )}
+                      ) : (
+                        <div className="text-[11px] font-bold text-(--muted)">Không có validations.</div>
+                      )}
+                    </div>
                   </div>
                 ) : (
                   <div className="rounded-xl border border-white/10 bg-black/20 p-3 text-[11px] font-bold text-(--muted)">
