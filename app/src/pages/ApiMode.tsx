@@ -1,11 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { qa } from "../lib/qa";
 import type { AppConfig } from "@core/config";
+import { importApiText } from "../lib/apiImport";
+import type { ImportKind, ImportedApiRequest } from "../lib/apiImport";
 
 type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS";
-type HeaderRow = { id: string; key: string; value: string };
+type HeaderRow = { id: string; enabled: boolean; key: string; value: string };
 type BodyType = "none" | "raw" | "json" | "form_urlencoded" | "form_data" | "binary";
-type KvRow = { id: string; key: string; value: string };
+type KvRow = { id: string; enabled: boolean; key: string; value: string };
 
 function newId() {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -14,6 +16,7 @@ function newId() {
 type ApiRequestTab = {
   id: string;
   name: string;
+  folder: string;
   context: string;
   method: HttpMethod;
   url: string;
@@ -33,6 +36,7 @@ type ApiRequestTab = {
 function rowsToHeaders(rows: HeaderRow[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (const r of rows) {
+    if (r.enabled === false) continue;
     const k = (r.key ?? "").trim();
     if (!k) continue;
     out[k] = (r.value ?? "").trim();
@@ -44,16 +48,17 @@ function newDefaultApiTab(): ApiRequestTab {
   return {
     id: newId(),
     name: "Request 1",
+    folder: "",
     context: "",
     method: "GET",
     url: "https://example.com",
-    params: [{ id: newId(), key: "", value: "" }],
+    params: [{ id: newId(), enabled: true, key: "", value: "" }],
     auth: { type: "none", bearerToken: "", basicUser: "", basicPass: "" },
-    headers: [{ id: newId(), key: "accept", value: "application/json" }],
+    headers: [{ id: newId(), enabled: true, key: "accept", value: "application/json" }],
     body: {
       type: "json",
       text: "",
-      fields: [{ id: newId(), key: "", value: "" }],
+      fields: [{ id: newId(), enabled: true, key: "", value: "" }],
       binary: null
     },
     expect: { status: 200, maxMs: 3000 },
@@ -68,10 +73,18 @@ function normalizeTab(t: any, fallbackName: string): ApiRequestTab {
     ...t,
     id: typeof t?.id === "string" && t.id ? t.id : base.id,
     name: typeof t?.name === "string" && t.name.trim() ? t.name : fallbackName,
+    folder: typeof t?.folder === "string" ? t.folder : "",
     context: typeof t?.context === "string" ? t.context : "",
     method: (["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const).includes(t?.method) ? t.method : base.method,
     url: typeof t?.url === "string" && t.url ? t.url : base.url,
-    params: Array.isArray(t?.params) ? t.params : base.params,
+    params: Array.isArray(t?.params)
+      ? t.params.map((r: any) => ({
+          id: typeof r?.id === "string" && r.id ? r.id : newId(),
+          enabled: r?.enabled !== false,
+          key: typeof r?.key === "string" ? r.key : "",
+          value: typeof r?.value === "string" ? r.value : ""
+        }))
+      : base.params,
     auth: {
       ...base.auth,
       ...(t?.auth ?? {}),
@@ -80,13 +93,27 @@ function normalizeTab(t: any, fallbackName: string): ApiRequestTab {
       basicUser: typeof t?.auth?.basicUser === "string" ? t.auth.basicUser : "",
       basicPass: typeof t?.auth?.basicPass === "string" ? t.auth.basicPass : ""
     },
-    headers: Array.isArray(t?.headers) ? t.headers : base.headers,
+    headers: Array.isArray(t?.headers)
+      ? t.headers.map((r: any) => ({
+          id: typeof r?.id === "string" && r.id ? r.id : newId(),
+          enabled: r?.enabled !== false,
+          key: typeof r?.key === "string" ? r.key : "",
+          value: typeof r?.value === "string" ? r.value : ""
+        }))
+      : base.headers,
     body: {
       ...base.body,
       ...(t?.body ?? {}),
       type: (["none", "raw", "json", "form_urlencoded", "form_data", "binary"] as const).includes(t?.body?.type) ? t.body.type : base.body.type,
       text: typeof t?.body?.text === "string" ? t.body.text : "",
-      fields: Array.isArray(t?.body?.fields) ? t.body.fields : base.body.fields,
+      fields: Array.isArray(t?.body?.fields)
+        ? t.body.fields.map((r: any) => ({
+            id: typeof r?.id === "string" && r.id ? r.id : newId(),
+            enabled: r?.enabled !== false,
+            key: typeof r?.key === "string" ? r.key : "",
+            value: typeof r?.value === "string" ? r.value : ""
+          }))
+        : base.body.fields,
       binary: t?.body?.binary && typeof t.body.binary?.base64 === "string" ? t.body.binary : null
     },
     expect: {
@@ -100,7 +127,36 @@ function normalizeTab(t: any, fallbackName: string): ApiRequestTab {
 }
 
 export function ApiMode() {
-  const [activePanel, setActivePanel] = useState<"params" | "authorization" | "headers" | "body">("params");
+  const [activePanel, setActivePanel] = useState<"params" | "context" | "authorization" | "headers" | "body">("params");
+  const [importOpen, setImportOpen] = useState(false);
+  const [importKind, setImportKind] = useState<ImportKind>("curl");
+  const [importText, setImportText] = useState("");
+  const [importPreview, setImportPreview] = useState<ImportedApiRequest[] | null>(null);
+  const [importErr, setImportErr] = useState<string | null>(null);
+  const [reqQuery, setReqQuery] = useState("");
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [folderMenuPath, setFolderMenuPath] = useState<string | null>(null);
+  const [requestMenuId, setRequestMenuId] = useState<string | null>(null);
+  const [newFolderOpen, setNewFolderOpen] = useState(false);
+  const [newFolderPath, setNewFolderPath] = useState("api");
+  const [dragOverFolder, setDragOverFolder] = useState<string | null>(null);
+  const [folders, setFolders] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem("ai-qa.api.folders.v1");
+      const parsed = raw ? (JSON.parse(raw) as unknown) : [];
+      return Array.isArray(parsed) ? parsed.map((x) => String(x)).filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [folderExpanded, setFolderExpanded] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = localStorage.getItem("ai-qa.api.folders.expanded.v1");
+      return raw ? (JSON.parse(raw) as Record<string, boolean>) : {};
+    } catch {
+      return {};
+    }
+  });
   const [{ tabs, activeRequestId }, setTabsState] = useState<{ tabs: ApiRequestTab[]; activeRequestId: string }>(() => {
     try {
       const raw = localStorage.getItem("ai-qa.api.tabs.v1");
@@ -191,6 +247,22 @@ export function ApiMode() {
   }, [tabs, activeRequestId]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem("ai-qa.api.folders.expanded.v1", JSON.stringify(folderExpanded));
+    } catch {
+      // ignore
+    }
+  }, [folderExpanded]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("ai-qa.api.folders.v1", JSON.stringify(folders));
+    } catch {
+      // ignore
+    }
+  }, [folders]);
+
+  useEffect(() => {
     const onVis = () => {
       if (document.visibilityState === "hidden") persistTabs();
     };
@@ -204,6 +276,50 @@ export function ApiMode() {
 
   const activeReq = useMemo(() => tabs.find((t) => t.id === activeRequestId) ?? tabs[0]!, [tabs, activeRequestId]);
   const safeActiveReq = activeReq;
+
+  const filteredTabs = useMemo(() => {
+    const q = reqQuery.trim().toLowerCase();
+    if (!q) return tabs;
+    return tabs.filter((t) => {
+      const hay = `${t.folder ?? ""} ${t.name} ${t.method} ${t.url}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [tabs, reqQuery]);
+
+  const folderTree = useMemo(() => {
+    type Node = { name: string; path: string; explicit: boolean; children: Map<string, Node>; requests: ApiRequestTab[] };
+    const root: Node = { name: "", path: "", explicit: false, children: new Map(), requests: [] };
+    function ensureNode(path: string, markExplicitLeaf = false) {
+      const parts = path.split("/").map((x) => x.trim()).filter(Boolean);
+      let cur = root;
+      let curPath = "";
+      for (const p of parts) {
+        curPath = curPath ? `${curPath}/${p}` : p;
+        let child = cur.children.get(p);
+        if (!child) {
+          child = { name: p, path: curPath, explicit: false, children: new Map(), requests: [] };
+          cur.children.set(p, child);
+        }
+        cur = child;
+      }
+      if (markExplicitLeaf) cur.explicit = true;
+      return cur;
+    }
+
+    // Seed empty folders so user can create folders without requests.
+    for (const f of folders) {
+      const folder = String(f ?? "").trim();
+      if (!folder) continue;
+      ensureNode(folder, true);
+    }
+
+    for (const t of filteredTabs) {
+      const folder = (t.folder ?? "").trim();
+      if (!folder) root.requests.push(t);
+      else ensureNode(folder).requests.push(t);
+    }
+    return root;
+  }, [filteredTabs, folders]);
 
   function updateActive(mut: (t: ApiRequestTab) => ApiRequestTab) {
     setTabsState((s) => ({
@@ -219,7 +335,16 @@ export function ApiMode() {
   function addTab() {
     const t = newDefaultApiTab();
     t.name = `Request ${tabs.length + 1}`;
-    setTabsState((s) => ({ tabs: [...s.tabs, t], activeRequestId: t.id }));
+    // Newest first (Postman-like)
+    setTabsState((s) => ({ tabs: [t, ...s.tabs], activeRequestId: t.id }));
+  }
+
+  function addTabInFolder(folderPath: string) {
+    const t = newDefaultApiTab();
+    t.name = `Request ${tabs.length + 1}`;
+    t.folder = normalizeFolderPath(folderPath);
+    // Newest first (Postman-like)
+    setTabsState((s) => ({ tabs: [t, ...s.tabs], activeRequestId: t.id }));
   }
 
   function closeTab(id: string) {
@@ -236,6 +361,7 @@ export function ApiMode() {
     try {
       const u = new URL(safeActiveReq.url ?? "");
       for (const r of safeActiveReq.params ?? []) {
+        if (r.enabled === false) continue;
         const k = (r.key ?? "").trim();
         if (!k) continue;
         u.searchParams.set(k, String(r.value ?? ""));
@@ -261,6 +387,8 @@ export function ApiMode() {
   }, [headers, safeActiveReq]);
 
   // Alias current tab fields to keep JSX simple
+  const tabName = safeActiveReq.name;
+  const tabFolder = safeActiveReq.folder;
   const method = safeActiveReq.method;
   const url = safeActiveReq.url;
   const apiContext = safeActiveReq.context;
@@ -281,6 +409,8 @@ export function ApiMode() {
   const activeTab = activePanel;
   const setActiveTab = setActivePanel;
 
+  const setTabName = (v: string) => updateActive((t) => ({ ...t, name: v }));
+  const setTabFolder = (v: string) => updateActive((t) => ({ ...t, folder: v }));
   const setMethod = (m: HttpMethod) => updateActive((t) => ({ ...t, method: m }));
   const setUrl = (u: string) => updateActive((t) => ({ ...t, url: u }));
   const setApiContext = (v: string) => updateActive((t) => ({ ...t, context: v }));
@@ -303,6 +433,10 @@ export function ApiMode() {
   // (rename removed)
 
   async function run() {
+    if ((finalUrl ?? "").startsWith("grpc://") || (finalUrl ?? "").startsWith("grpcs://")) {
+      setError("Chưa hỗ trợ chạy gRPC. Bạn vẫn có thể import gRPCurl để lưu/spec, nhưng Send chỉ hỗ trợ HTTP(S).");
+      return;
+    }
     setRunning(true);
     setError(null);
     setResult(null);
@@ -354,6 +488,192 @@ export function ApiMode() {
     setLogs([]);
     setResult(null);
     setError(null);
+  }
+
+  function detectImportKindFromFilename(name: string): ImportKind {
+    const n = (name ?? "").toLowerCase().trim();
+    if (n.endsWith(".yaml") || n.endsWith(".yml")) return "yaml";
+    if (n.endsWith(".json")) return "raw";
+    if (n.endsWith(".grpcurl")) return "grpcurl";
+    if (n.endsWith(".sh") || n.endsWith(".curl") || n.endsWith(".txt")) return "curl";
+    return "raw";
+  }
+
+  function normalizeFolderPath(input: string) {
+    const raw = String(input ?? "").trim();
+    const parts = raw
+      .split("/")
+      .map((x) => x.trim())
+      .filter(Boolean);
+    return parts.join("/");
+  }
+
+  function ensureFolder(path: string) {
+    const p = normalizeFolderPath(path);
+    if (!p) return "";
+    setFolders((prev) => (prev.includes(p) ? prev : [p, ...prev]));
+    setFolderExpanded((prev) => ({ ...prev, [p]: true }));
+    return p;
+  }
+
+  function moveTabToFolder(tabId: string, folderPath: string) {
+    const p = normalizeFolderPath(folderPath);
+    if (!p) return;
+    ensureFolder(p);
+    setTabsState((s) => ({
+      ...s,
+      tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, folder: p } : t))
+    }));
+  }
+
+  function moveFolderToFolder(sourcePath: string, targetPath: string) {
+    const src = normalizeFolderPath(sourcePath);
+    const dst = normalizeFolderPath(targetPath);
+    if (!src || !dst) return;
+    if (src === dst) return;
+    // Prevent moving a folder into itself/descendant.
+    if (dst === src || dst.startsWith(src + "/")) return;
+
+    const srcName = src.split("/").filter(Boolean).slice(-1)[0] ?? "";
+    if (!srcName) return;
+    const nextBase = normalizeFolderPath(`${dst}/${srcName}`);
+    if (!nextBase) return;
+    if (nextBase === src) return;
+    if (nextBase.startsWith(src + "/")) return;
+
+    // Update explicit folders
+    setFolders((prev) => {
+      const mapped = prev.map((p) => {
+        const fp = normalizeFolderPath(p);
+        if (!fp) return "";
+        if (fp === src) return nextBase;
+        if (fp.startsWith(src + "/")) return nextBase + fp.slice(src.length);
+        return fp;
+      }).filter(Boolean);
+      return Array.from(new Set(mapped));
+    });
+
+    // Update expanded states
+    setFolderExpanded((prev) => {
+      const out: Record<string, boolean> = {};
+      for (const [k, v] of Object.entries(prev)) {
+        const fp = normalizeFolderPath(k);
+        if (!fp) continue;
+        if (fp === src) out[nextBase] = v;
+        else if (fp.startsWith(src + "/")) out[nextBase + fp.slice(src.length)] = v;
+        else out[fp] = v;
+      }
+      return out;
+    });
+
+    // Update tabs folder path
+    setTabsState((s) => ({
+      ...s,
+      tabs: s.tabs.map((t) => {
+        const fp = normalizeFolderPath(t.folder);
+        if (!fp) return t;
+        if (fp === src) return { ...t, folder: nextBase };
+        if (fp.startsWith(src + "/")) return { ...t, folder: nextBase + fp.slice(src.length) };
+        return t;
+      })
+    }));
+
+    setFolderMenuPath(null);
+  }
+
+  function moveFolderToRoot(sourcePath: string) {
+    const src = normalizeFolderPath(sourcePath);
+    if (!src) return;
+    if (!src.includes("/")) return; // already root-level
+    const name = src.split("/").filter(Boolean).slice(-1)[0] ?? "";
+    if (!name) return;
+    const nextBase = normalizeFolderPath(name);
+    if (!nextBase || nextBase === src) return;
+
+    // Update explicit folders
+    setFolders((prev) => {
+      const mapped = prev
+        .map((p) => {
+          const fp = normalizeFolderPath(p);
+          if (!fp) return "";
+          if (fp === src) return nextBase;
+          if (fp.startsWith(src + "/")) return nextBase + fp.slice(src.length);
+          return fp;
+        })
+        .filter(Boolean);
+      return Array.from(new Set(mapped));
+    });
+
+    // Update expanded states
+    setFolderExpanded((prev) => {
+      const out: Record<string, boolean> = {};
+      for (const [k, v] of Object.entries(prev)) {
+        const fp = normalizeFolderPath(k);
+        if (!fp) continue;
+        if (fp === src) out[nextBase] = v;
+        else if (fp.startsWith(src + "/")) out[nextBase + fp.slice(src.length)] = v;
+        else out[fp] = v;
+      }
+      return out;
+    });
+
+    // Update tabs folder path
+    setTabsState((s) => ({
+      ...s,
+      tabs: s.tabs.map((t) => {
+        const fp = normalizeFolderPath(t.folder);
+        if (!fp) return t;
+        if (fp === src) return { ...t, folder: nextBase };
+        if (fp.startsWith(src + "/")) return { ...t, folder: nextBase + fp.slice(src.length) };
+        return t;
+      })
+    }));
+
+    setFolderMenuPath(null);
+  }
+
+  function moveTabToRoot(tabId: string) {
+    setTabsState((s) => ({
+      ...s,
+      tabs: s.tabs.map((t) => (t.id === tabId ? { ...t, folder: "" } : t))
+    }));
+  }
+
+  function deleteFolderTree(folderPath: string) {
+    const src = normalizeFolderPath(folderPath);
+    if (!src) return;
+    if (!confirm(`Xoá folder "${src}" và toàn bộ request/subfolder bên trong?`)) return;
+
+    // remove explicit folders within subtree
+    setFolders((prev) => prev.filter((p) => {
+      const fp = normalizeFolderPath(p);
+      if (!fp) return false;
+      return !(fp === src || fp.startsWith(src + "/"));
+    }));
+
+    setFolderExpanded((prev) => {
+      const out: Record<string, boolean> = {};
+      for (const [k, v] of Object.entries(prev)) {
+        const fp = normalizeFolderPath(k);
+        if (!fp) continue;
+        if (fp === src || fp.startsWith(src + "/")) continue;
+        out[fp] = v;
+      }
+      return out;
+    });
+
+    setTabsState((s) => {
+      const kept = s.tabs.filter((t) => {
+        const fp = normalizeFolderPath(t.folder);
+        if (!fp) return true;
+        return !(fp === src || fp.startsWith(src + "/"));
+      });
+      const nextTabs = kept.length ? kept : [newDefaultApiTab()];
+      const nextActive = nextTabs.some((t) => t.id === s.activeRequestId) ? s.activeRequestId : nextTabs[0]!.id;
+      return { tabs: nextTabs, activeRequestId: nextActive };
+    });
+
+    setFolderMenuPath(null);
   }
 
   async function runScenarioLog(method: string, url: string, headers?: Record<string, string>, body?: string, expect?: any) {
@@ -409,66 +729,684 @@ export function ApiMode() {
 
   return (
     <div className="grid gap-4">
-      <div>
-        <div className="text-base font-extrabold">API test mode</div>
-        <div className="text-sm text-slate-300">Gửi request và validate theo điều kiện (MVP).</div>
+      {menuOpen || folderMenuPath || requestMenuId ? (
+        <div
+          className="fixed inset-0 z-40 bg-black/60"
+          onMouseDown={() => {
+            setMenuOpen(false);
+            setFolderMenuPath(null);
+            setRequestMenuId(null);
+          }}
+        />
+      ) : null}
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <div className="text-base font-extrabold">API test mode</div>
+          <div className="text-sm text-slate-300">Gửi request và validate theo điều kiện (MVP).</div>
+        </div>
+        <div />
       </div>
 
-      <div className="flex flex-wrap items-center justify-between gap-2 rounded-2xl border border-white/10 bg-black/20 p-3">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <div className="text-xs font-extrabold text-slate-300">Tabs</div>
-          <div className="flex min-w-0 flex-wrap items-center gap-1">
-            {tabs.map((t) => (
+      {importOpen ? (
+        <div
+          className="fixed inset-0 z-50 bg-black/70"
+          onMouseDown={() => setImportOpen(false)}
+        >
+          <div
+            className="fixed left-1/2 top-1/2 w-[min(880px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-(--border) bg-slate-950 p-4 shadow-2xl"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-sm font-extrabold">Import</div>
+              <button
+                onClick={() => setImportOpen(false)}
+                className="rounded-xl bg-(--btn) px-3 py-2 text-xs font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-3 grid max-h-[80vh] gap-2 overflow-auto pr-1 [scrollbar-gutter:stable]">
+            <div className="grid gap-2 md:grid-cols-[220px_1fr]">
+              <label className="grid gap-1">
+                <div className="text-xs font-bold text-slate-300">Nguồn import</div>
+                <select
+                  value={importKind}
+                  onChange={(e) => {
+                    setImportKind(e.target.value as ImportKind);
+                    setImportPreview(null);
+                    setImportErr(null);
+                  }}
+                  className="rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm font-bold text-slate-100 outline-none focus:border-white/25"
+                >
+                  <option value="curl">cURL</option>
+                  <option value="yaml">YAML</option>
+                  <option value="grpcurl">gRPCurl</option>
+                  <option value="raw">Raw (JSON/URL)</option>
+                </select>
+              </label>
+              <div className="grid content-end text-xs text-slate-400">
+                {importKind === "yaml" ? (
+                  <div>
+                    Hỗ trợ YAML dạng 1 request, danh sách request, hoặc object có field <code className="rounded bg-white/10 px-1">requests</code>.
+                  </div>
+                ) : importKind === "raw" ? (
+                  <div>Hỗ trợ JSON 1 request / mảng request, hoặc dán thẳng URL.</div>
+                ) : importKind === "grpcurl" ? (
+                  <div>Import để lưu/spec. Chưa hỗ trợ chạy gRPC (Send chỉ chạy HTTP).</div>
+                ) : (
+                  <div>Dán nguyên lệnh <code className="rounded bg-white/10 px-1">curl ...</code>.</div>
+                )}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-(--border) bg-(--surface-2) p-3">
+              <div className="text-xs font-bold text-slate-300">Chọn file để import</div>
+              <input
+                type="file"
+                accept=".txt,.sh,.curl,.yaml,.yml,.json,.grpcurl"
+                onChange={async (e) => {
+                  const f = e.target.files?.[0];
+                  if (!f) return;
+                  try {
+                    const t = await f.text();
+                    const kind = detectImportKindFromFilename(f.name);
+                    setImportKind(kind);
+                    setImportText(t);
+                    setImportPreview(null);
+                    setImportErr(null);
+                  } catch (err) {
+                    setImportErr(err instanceof Error ? err.message : String(err));
+                    setImportPreview(null);
+                  } finally {
+                    // allow re-selecting same file
+                    e.currentTarget.value = "";
+                  }
+                }}
+                className="text-sm text-(--app-fg) file:mr-3 file:rounded-lg file:border-0 file:bg-(--btn) file:px-3 file:py-2 file:text-sm file:font-extrabold file:text-(--app-fg) hover:file:bg-(--btn-hover)"
+              />
+            </div>
+
+            <textarea
+              value={importText}
+              onChange={(e) => {
+                setImportText(e.target.value);
+                setImportPreview(null);
+                setImportErr(null);
+              }}
+              rows={7}
+              className="resize-y rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
+              placeholder={
+                importKind === "curl"
+                  ? 'curl -X POST "https://api.example.com/v1/login" -H "content-type: application/json" -d \'{"email":"a@b.com","password":"***"}\''
+                  : importKind === "grpcurl"
+                    ? 'grpcurl -plaintext -d \'{"id":"123"}\' localhost:50051 my.service.UserService/GetUser'
+                    : importKind === "yaml"
+                      ? ["requests:", "  - name: Health", "    method: GET", "    url: https://api.example.com/health"].join("\n")
+                      : '{ "name": "Health", "method": "GET", "url": "https://api.example.com/health" }'
+              }
+            />
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => {
+                  try {
+                    const imported = importApiText(importKind, importText);
+                    setImportPreview(imported);
+                    setImportErr(null);
+                  } catch (e) {
+                    setImportPreview(null);
+                    setImportErr(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+                className="rounded-xl bg-(--btn) px-4 py-2 text-sm font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+              >
+                Preview
+              </button>
+              <button
+                onClick={() => {
+                  try {
+                    const imported = importPreview ?? importApiText(importKind, importText);
+                    const nextTabs: ApiRequestTab[] = imported.map((r, idx) => {
+                      const base = newDefaultApiTab();
+                      const name = (r.name ?? "").trim() || `${importKind.toUpperCase()} ${idx + 1}`;
+                      const method = String(r.method ?? "GET").toUpperCase() as HttpMethod;
+                      const url = String(r.url ?? "");
+                      const headers = r.headers
+                        ? Object.entries(r.headers).map(([k, v]) => ({ id: newId(), enabled: true, key: k, value: String(v) }))
+                        : base.headers;
+                      const bodyType = (r.body?.type ?? "none") as BodyType;
+                      const bodyText = typeof r.body?.text === "string" ? r.body.text : "";
+                      const bodyFields =
+                        Array.isArray(r.body?.fields) && r.body!.fields!.length
+                          ? r.body!.fields!.map((kv) => ({ id: newId(), enabled: true, key: String(kv.key ?? ""), value: String(kv.value ?? "") }))
+                          : base.body.fields;
+                      return {
+                        ...base,
+                        name,
+                        context: r.context ?? "",
+                        method: (["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"] as const).includes(method) ? method : "GET",
+                        url,
+                        headers,
+                        body: {
+                          ...base.body,
+                          type: (["none", "raw", "json", "form_urlencoded", "form_data", "binary"] as const).includes(bodyType) ? bodyType : "raw",
+                          text: bodyText,
+                          fields: bodyFields
+                        },
+                        timeoutMs: Number.isFinite(r.timeoutMs as number) ? Number(r.timeoutMs) : base.timeoutMs,
+                        expect: {
+                          status: Number.isFinite(r.expect?.status as number) ? Number(r.expect!.status) : base.expect.status,
+                          maxMs: Number.isFinite(r.expect?.maxMs as number) ? Number(r.expect!.maxMs) : base.expect.maxMs
+                        }
+                      };
+                    });
+
+                    setTabsState((s) => {
+                      const merged = [...nextTabs, ...s.tabs];
+                      return { tabs: merged, activeRequestId: nextTabs[0]?.id ?? s.activeRequestId };
+                    });
+                    setImportErr(null);
+                    setImportPreview(null);
+                    setImportText("");
+                    setImportOpen(false);
+                    setMenuOpen(false);
+                  } catch (e) {
+                    setImportErr(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+                disabled={!importText.trim()}
+                className="rounded-xl bg-blue-500 px-4 py-2 text-sm font-extrabold text-white hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Apply to tabs
+              </button>
+              <button
+                onClick={() => {
+                  setImportText("");
+                  setImportPreview(null);
+                  setImportErr(null);
+                }}
+                className="rounded-xl bg-(--btn) px-4 py-2 text-sm font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+              >
+                Clear
+              </button>
+            </div>
+
+            {importErr ? <div className="text-sm text-red-300">{importErr}</div> : null}
+            {importPreview ? (
+              <pre className="max-h-56 overflow-auto rounded-xl border border-(--border) bg-(--surface-2) p-3 text-xs text-(--app-fg)">
+                {JSON.stringify(importPreview, null, 2)}
+              </pre>
+            ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {newFolderOpen ? (
+        <div
+          className="fixed inset-0 z-50 bg-black/70"
+          onMouseDown={() => setNewFolderOpen(false)}
+        >
+          <div
+            className="fixed left-1/2 top-1/2 w-[min(520px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-(--border) bg-slate-950 p-4 shadow-2xl"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-sm font-extrabold">New folder</div>
+              <button
+                onClick={() => setNewFolderOpen(false)}
+                className="rounded-xl bg-(--btn) px-3 py-2 text-xs font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-3 grid gap-2">
+              <label className="grid gap-1">
+                <div className="text-xs font-bold text-slate-300">Folder path</div>
+                <input
+                  value={newFolderPath}
+                  onChange={(e) => setNewFolderPath(e.target.value)}
+                  className="rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
+                  placeholder="e.g. api/auth"
+                  autoFocus
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      const p = ensureFolder(newFolderPath);
+                      if (p) setReqQuery("");
+                      setNewFolderOpen(false);
+                    } else if (e.key === "Escape") {
+                      setNewFolderOpen(false);
+                    }
+                  }}
+                />
+              </label>
+
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  onClick={() => setNewFolderOpen(false)}
+                  className="rounded-xl bg-(--btn) px-4 py-2 text-sm font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    const p = ensureFolder(newFolderPath);
+                    if (p) setReqQuery("");
+                    setNewFolderOpen(false);
+                  }}
+                  className="rounded-xl bg-blue-500 px-4 py-2 text-sm font-extrabold text-white hover:bg-blue-400"
+                >
+                  Create
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="grid gap-3 md:grid-cols-[340px_1fr]">
+        {/* Sidebar (Postman-like) */}
+        <div className="flex h-[70vh] min-h-0 flex-col gap-3 rounded-2xl border border-(--border) bg-(--surface) p-3 md:h-[calc(100vh-260px)]">
+          <div className="grid gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-xs font-extrabold text-slate-300">Requests</div>
+              <div className="relative flex items-center gap-2">
+                <button
+                  onClick={addTab}
+                  className="rounded-lg bg-blue-500 px-3 py-1 text-xs font-extrabold text-white hover:bg-blue-400"
+                >
+                  + New
+                </button>
+                <button
+                  onClick={() => setMenuOpen((v) => !v)}
+                  className="rounded-lg bg-(--btn) px-2 py-1 text-xs font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                  title="Menu"
+                >
+                  …
+                </button>
+                {menuOpen ? (
+                  <div
+                    className="absolute right-0 top-9 z-50 w-44 overflow-hidden rounded-xl border border-(--border) bg-(--surface) shadow-xl"
+                    onMouseDown={(e) => e.stopPropagation()}
+                  >
+                    <button
+                      onClick={() => {
+                        setMenuOpen(false);
+                        setNewFolderOpen(true);
+                      }}
+                      className="w-full px-3 py-2 text-left text-xs font-extrabold text-(--app-fg) hover:bg-(--btn)"
+                    >
+                      New folder
+                    </button>
+                    <button
+                      onClick={() => {
+                        setImportOpen(true);
+                        setMenuOpen(false);
+                      }}
+                      className="w-full px-3 py-2 text-left text-xs font-extrabold text-(--app-fg) hover:bg-(--btn)"
+                    >
+                      Import
+                    </button>
+                    <button
+                      onClick={() => {
+                        clearLogs();
+                        setMenuOpen(false);
+                      }}
+                      className="w-full px-3 py-2 text-left text-xs font-extrabold text-(--app-fg) hover:bg-(--btn)"
+                    >
+                      Clear logs/result
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            <input
+              value={reqQuery}
+              onChange={(e) => setReqQuery(e.target.value)}
+              placeholder="Search (name / method / url)"
+              className="w-full rounded-xl border border-(--border) bg-(--surface-2) px-3 py-2 text-xs font-bold text-(--app-fg) outline-none placeholder:text-(--muted) focus:border-(--btn-hover)"
+            />
+          </div>
+
+          <div
+            className="flex min-h-0 flex-1 flex-col gap-1 overflow-auto pr-1 [scrollbar-gutter:stable]"
+            onDragOver={(e) => {
+              // Drop to background (outside folder items) => move to root
+              e.preventDefault();
+              setDragOverFolder("__root__");
+              try {
+                e.dataTransfer.dropEffect = "move";
+              } catch {
+                // ignore
+              }
+            }}
+            onDragLeave={() => setDragOverFolder((p) => (p === "__root__" ? null : p))}
+            onDrop={(e) => {
+              e.preventDefault();
+              const folderSrc = e.dataTransfer.getData("text/folder");
+              if (folderSrc) {
+                moveFolderToRoot(folderSrc);
+              } else {
+                const id = e.dataTransfer.getData("text/plain");
+                if (id) moveTabToRoot(id);
+              }
+              setDragOverFolder(null);
+            }}
+            title="Drop here to move to root"
+          >
+            {/* Root (no folder) */}
+            {folderTree.requests.map((t) => (
               <button
                 key={t.id}
                 onClick={() => {
-                  // Persist first to avoid losing unsaved edits when switching tabs quickly.
                   persistTabs();
                   setActiveRequestId(t.id);
                 }}
+                draggable
+                onDragStart={(e) => {
+                  try {
+                    e.dataTransfer.setData("text/plain", t.id);
+                    e.dataTransfer.effectAllowed = "move";
+                  } catch {
+                    // ignore
+                  }
+                }}
                 className={[
-                  "grid max-w-[320px] gap-0.5 rounded-xl border px-3 py-1 text-left",
+                  "flex shrink-0 items-start justify-between gap-2 rounded-xl border px-3 py-2 text-left",
                   t.id === activeRequestId
-                    ? "border-white/15 bg-white/10"
-                    : "border-white/10 bg-black/20 hover:bg-white/5"
+                    ? "border-(--border) bg-(--btn)"
+                    : "border-(--border) bg-(--surface-2) hover:bg-(--btn)"
                 ].join(" ")}
                 title={t.name}
               >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="text-xs font-extrabold text-slate-100">{t.method}</div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="rounded bg-(--btn) px-1.5 py-0.5 text-[11px] font-extrabold text-(--app-fg)">
+                      {t.method}
+                    </span>
+                    <span className="truncate text-xs font-extrabold text-(--app-fg)">{t.name}</span>
+                  </div>
+                  <div className="mt-1 truncate text-[11px] font-bold text-(--muted)">{t.url || "(no url)"}</div>
+                </div>
+                <div className="relative flex items-center gap-1">
                   <button
+                    type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      closeTab(t.id);
+                      setRequestMenuId((cur) => (cur === t.id ? null : t.id));
                     }}
-                    className="rounded-lg bg-white/10 px-2 py-0.5 text-[11px] font-extrabold text-slate-200 hover:bg-white/15"
-                    title="Close tab"
+                    className="rounded-lg bg-(--btn) px-2 py-0.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                    title="Menu"
                   >
-                    ×
+                    …
                   </button>
-                </div>
-                <div className="max-w-[300px] truncate text-[11px] font-bold text-slate-300">
-                  {t.url || "(no url)"}
+                  {requestMenuId === t.id ? (
+                    <div
+                      className="absolute right-0 top-6 z-60 w-44 overflow-hidden rounded-xl border border-(--border) bg-(--surface) shadow-xl"
+                      onMouseDown={(e) => e.stopPropagation()}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          closeTab(t.id);
+                          setRequestMenuId(null);
+                        }}
+                        className="w-full px-3 py-2 text-left text-xs font-extrabold text-red-300 hover:bg-(--btn)"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               </button>
             ))}
+
+            {/* Folder tree */}
+            {(() => {
+              const renderNode = (node: any, depth: number): any => {
+                const children = Array.from(node.children.values()).sort((a: any, b: any) => a.name.localeCompare(b.name));
+                const hasContent = Boolean(node.explicit) || children.length > 0 || node.requests.length > 0;
+                if (!hasContent) return null;
+                const expanded = folderExpanded[node.path] ?? true;
+                return (
+                  <div key={node.path} className="grid gap-1">
+                    <button
+                      onClick={() => {
+                        setFolderMenuPath((cur) => (cur === node.path ? null : cur));
+                      }}
+                      draggable
+                      onDragStart={(e) => {
+                        try {
+                          e.dataTransfer.setData("text/folder", node.path);
+                          e.dataTransfer.effectAllowed = "move";
+                        } catch {
+                          // ignore
+                        }
+                      }}
+                      className={[
+                        "flex shrink-0 items-center justify-between rounded-xl border border-(--border) px-3 py-2 text-left hover:bg-(--btn)",
+                        dragOverFolder === node.path ? "bg-(--btn)" : "bg-(--surface-2)"
+                      ].join(" ")}
+                      onDragOver={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        setDragOverFolder(node.path);
+                        try {
+                          e.dataTransfer.dropEffect = "move";
+                        } catch {
+                          // ignore
+                        }
+                      }}
+                      onDragLeave={(e) => {
+                        e.stopPropagation();
+                        setDragOverFolder((p) => (p === node.path ? null : p));
+                      }}
+                      onDrop={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        const folderSrc = e.dataTransfer.getData("text/folder");
+                        if (folderSrc) {
+                          moveFolderToFolder(folderSrc, node.path);
+                        } else {
+                          const id = e.dataTransfer.getData("text/plain");
+                          if (id) moveTabToFolder(id, node.path);
+                        }
+                        setDragOverFolder(null);
+                      }}
+                      data-dropping={dragOverFolder === node.path ? "1" : undefined}
+                      style={{ marginLeft: depth ? depth * 12 : 0 }}
+                      title={node.path}
+                    >
+                      <div className="min-w-0 text-xs font-extrabold text-(--app-fg)">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setFolderExpanded((p) => ({ ...p, [node.path]: !(p[node.path] ?? true) }));
+                          }}
+                          className="mr-2 inline-flex w-5 items-center justify-center rounded bg-(--btn) px-1 py-0.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                          title={expanded ? "Collapse" : "Expand"}
+                        >
+                          {expanded ? "▾" : "▸"}
+                        </button>
+                        <span className="truncate">{node.name}</span>
+                      </div>
+                      <div className="relative flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setFolderMenuPath((cur) => (cur === node.path ? null : node.path));
+                          }}
+                          className="rounded bg-(--btn) px-2 py-0.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                          title="Folder menu"
+                        >
+                          …
+                        </button>
+                        {folderMenuPath === node.path ? (
+                          <div
+                            className="absolute right-0 top-6 z-60 w-48 overflow-hidden rounded-xl border border-(--border) bg-(--surface) shadow-xl"
+                            onMouseDown={(e) => e.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                addTabInFolder(node.path);
+                                setFolderMenuPath(null);
+                              }}
+                              className="w-full px-3 py-2 text-left text-xs font-extrabold text-(--app-fg) hover:bg-(--btn)"
+                            >
+                              Add request
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setNewFolderPath(`${node.path}/`);
+                                setNewFolderOpen(true);
+                                setFolderMenuPath(null);
+                              }}
+                              className="w-full px-3 py-2 text-left text-xs font-extrabold text-(--app-fg) hover:bg-(--btn)"
+                            >
+                              Add subfolder
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                deleteFolderTree(node.path);
+                              }}
+                              className="w-full px-3 py-2 text-left text-xs font-extrabold text-red-300 hover:bg-(--btn)"
+                            >
+                              Delete folder
+                            </button>
+                          </div>
+                        ) : null}
+                      </div>
+                    </button>
+                    {expanded ? (
+                      <div className="grid gap-1">
+                        {node.requests.map((t: ApiRequestTab) => (
+                          <button
+                            key={t.id}
+                            onClick={() => {
+                              persistTabs();
+                              setActiveRequestId(t.id);
+                            }}
+                            draggable
+                            onDragStart={(e) => {
+                              try {
+                                e.dataTransfer.setData("text/plain", t.id);
+                                e.dataTransfer.effectAllowed = "move";
+                              } catch {
+                                // ignore
+                              }
+                            }}
+                            className={[
+                              "flex shrink-0 items-start justify-between gap-2 rounded-xl border px-3 py-2 text-left",
+                              t.id === activeRequestId
+                                ? "border-(--border) bg-(--btn)"
+                                : "border-(--border) bg-(--surface-2) hover:bg-(--btn)"
+                            ].join(" ")}
+                            style={{ marginLeft: (depth + 1) * 12 }}
+                            title={t.name}
+                          >
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="rounded bg-(--btn) px-1.5 py-0.5 text-[11px] font-extrabold text-(--app-fg)">
+                                  {t.method}
+                                </span>
+                                <span className="truncate text-xs font-extrabold text-(--app-fg)">{t.name}</span>
+                              </div>
+                              <div className="mt-1 truncate text-[11px] font-bold text-(--muted)">{t.url || "(no url)"}</div>
+                            </div>
+                            <div className="relative flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setRequestMenuId((cur) => (cur === t.id ? null : t.id));
+                                }}
+                                className="rounded-lg bg-(--btn) px-2 py-0.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                                title="Menu"
+                              >
+                                …
+                              </button>
+                              {requestMenuId === t.id ? (
+                                <div
+                                  className="absolute right-0 top-6 z-60 w-44 overflow-hidden rounded-xl border border-(--border) bg-(--surface) shadow-xl"
+                                  onMouseDown={(e) => e.stopPropagation()}
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      closeTab(t.id);
+                                      setRequestMenuId(null);
+                                    }}
+                                    className="w-full px-3 py-2 text-left text-xs font-extrabold text-red-300 hover:bg-(--btn)"
+                                  >
+                                    Delete
+                                  </button>
+                                </div>
+                              ) : null}
+                            </div>
+                          </button>
+                        ))}
+                        {children.map((c: any) => renderNode(c, depth + 1))}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              };
+              const top = Array.from(folderTree.children.values()).sort((a: any, b: any) => a.name.localeCompare(b.name));
+              return top.map((n: any) => renderNode(n, 0));
+            })()}
+            {filteredTabs.length === 0 ? (
+              <div className="rounded-xl border border-(--border) bg-(--surface-2) p-3 text-xs font-bold text-(--muted)">
+                Không có request phù hợp.
+              </div>
+            ) : null}
+          </div>
+
+          <div className="border-t border-(--border) pt-3 text-[11px] font-bold text-(--muted)">
+            {filteredTabs.length}/{tabs.length} requests
           </div>
         </div>
-        <button
-          onClick={addTab}
-          className="rounded-xl bg-blue-500 px-3 py-2 text-xs font-extrabold text-white hover:bg-blue-400"
-        >
-          + New tab
-        </button>
-      </div>
-      <div className="text-xs text-slate-400">
-        URL:{" "}
-        <span className="inline-block max-w-full truncate align-bottom font-extrabold text-slate-200">
-          {safeActiveReq.url}
-        </span>
-      </div>
 
-      <div className="grid gap-3 rounded-2xl border border-white/10 bg-black/20 p-4">
+        {/* Main editor */}
+        <div className="grid gap-3 rounded-2xl border border-(--border) bg-(--surface) p-4">
+          <div className="text-xs text-(--muted)">
+            URL:{" "}
+            <span className="inline-block max-w-full truncate align-bottom font-extrabold text-(--app-fg)">
+              {safeActiveReq.url}
+            </span>
+          </div>
+
+        <div className="grid gap-2 md:grid-cols-2">
+          <label className="grid gap-1">
+            <div className="text-xs font-bold text-slate-300">Name</div>
+            <input
+              value={tabName}
+              onChange={(e) => setTabName(e.target.value)}
+              className="rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
+              placeholder="Request name"
+            />
+          </label>
+          <label className="grid gap-1">
+            <div className="text-xs font-bold text-slate-300">Folder</div>
+            <input
+              value={tabFolder}
+              onChange={(e) => setTabFolder(e.target.value)}
+              className="rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
+              placeholder="e.g. api/auth"
+            />
+          </label>
+        </div>
+
         <div className="grid gap-2 md:grid-cols-[140px_1fr_auto]">
           <label className="grid gap-1">
             <div className="text-xs font-bold text-slate-300">Method</div>
@@ -504,25 +1442,6 @@ export function ApiMode() {
           </div>
         </div>
 
-        <label className="grid gap-1">
-          <div className="text-xs font-bold text-slate-300">Context (API / validation)</div>
-          <textarea
-            value={apiContext}
-            onChange={(e) => setApiContext(e.target.value)}
-            rows={4}
-            className="resize-y rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
-            placeholder={[
-              "Mô tả ngữ cảnh API để AI tạo kịch bản test sát hơn:",
-              "- Auth (token/cookie), role, base path, version",
-              "- Điều kiện validate: status, latency, schema, idempotent, paging...",
-              "- Những endpoint nhạy cảm cần tránh (delete/real money...)"
-            ].join("\n")}
-          />
-          <div className="text-xs text-slate-400">
-            Context này sẽ được dùng khi bấm <b className="text-slate-200">Tạo kịch bản test</b>.
-          </div>
-        </label>
-
         <div className="border-b border-white/10">
           <div className="flex items-center gap-5">
             <button
@@ -534,6 +1453,16 @@ export function ApiMode() {
             >
               Params
               {activeTab === "params" ? <span className="absolute inset-x-0 bottom-0 h-0.5 bg-blue-400" /> : null}
+            </button>
+            <button
+              onClick={() => setActiveTab("context")}
+              className={[
+                "relative -mb-px px-1 py-2 text-sm font-extrabold",
+                activeTab === "context" ? "text-slate-100" : "text-slate-300 hover:text-slate-200"
+              ].join(" ")}
+            >
+              Context
+              {activeTab === "context" ? <span className="absolute inset-x-0 bottom-0 h-0.5 bg-blue-400" /> : null}
             </button>
             <button
               onClick={() => setActiveTab("authorization")}
@@ -573,7 +1502,7 @@ export function ApiMode() {
             <div className="flex items-center justify-between gap-2">
               <div className="text-xs font-bold text-slate-300">Query params</div>
               <button
-                onClick={() => setParamRows((p) => [...p, { id: newId(), key: "", value: "" }])}
+                onClick={() => setParamRows((p) => [...p, { id: newId(), enabled: true, key: "", value: "" }])}
                 className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-extrabold text-slate-200 hover:bg-white/15"
               >
                 + Add
@@ -581,7 +1510,17 @@ export function ApiMode() {
             </div>
             <div className="grid gap-2 rounded-xl border border-white/10 bg-black/20 p-3">
               {paramRows.map((r) => (
-                <div key={r.id} className="grid grid-cols-[1fr_1fr_40px] gap-2">
+                <div key={r.id} className="grid grid-cols-[28px_1fr_1fr_40px] gap-2">
+                  <label className="grid place-items-center">
+                    <input
+                      type="checkbox"
+                      checked={r.enabled !== false}
+                      onChange={(e) =>
+                        setParamRows((p) => p.map((x) => (x.id === r.id ? { ...x, enabled: e.target.checked } : x)))
+                      }
+                      title="Use this param when sending"
+                    />
+                  </label>
                   <input
                     value={r.key}
                     onChange={(e) =>
@@ -608,9 +1547,30 @@ export function ApiMode() {
                 </div>
               ))}
               <div className="text-xs text-slate-400">
-                URL thực tế sẽ chạy: <span className="text-slate-200">{finalUrl}</span>
+                URL: <span className="text-slate-200">{finalUrl}</span>
               </div>
             </div>
+          </div>
+        ) : activeTab === "context" ? (
+          <div className="grid gap-2 rounded-xl border border-white/10 bg-black/20 p-3">
+            <label className="grid gap-1">
+              <div className="text-xs font-bold text-slate-300">Context (API / validation)</div>
+              <textarea
+                value={apiContext}
+                onChange={(e) => setApiContext(e.target.value)}
+                rows={8}
+                className="resize-y rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
+                placeholder={[
+                  "Mô tả ngữ cảnh API để AI tạo kịch bản test sát hơn:",
+                  "- Auth (token/cookie), role, base path, version",
+                  "- Điều kiện validate: status, latency, schema, idempotent, paging...",
+                  "- Những endpoint nhạy cảm cần tránh (delete/real money...)"
+                ].join("\n")}
+              />
+              <div className="text-xs text-slate-400">
+                Context này sẽ được dùng khi bấm <b className="text-slate-200">Tạo kịch bản test</b>.
+              </div>
+            </label>
           </div>
         ) : activeTab === "authorization" ? (
           <div className="grid gap-2 rounded-xl border border-white/10 bg-black/20 p-3">
@@ -671,7 +1631,7 @@ export function ApiMode() {
             <div className="flex items-center justify-between gap-2">
               <div className="text-xs font-bold text-slate-300">Headers</div>
               <button
-                onClick={() => setHeaderRows((p) => [...p, { id: newId(), key: "", value: "" }])}
+                onClick={() => setHeaderRows((p) => [...p, { id: newId(), enabled: true, key: "", value: "" }])}
                 className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-extrabold text-slate-200 hover:bg-white/15"
               >
                 + Add
@@ -679,7 +1639,17 @@ export function ApiMode() {
             </div>
             <div className="grid gap-2 rounded-xl border border-white/10 bg-black/20 p-3">
               {headerRows.map((r) => (
-                <div key={r.id} className="grid grid-cols-[1fr_1fr_40px] gap-2">
+                <div key={r.id} className="grid grid-cols-[28px_1fr_1fr_40px] gap-2">
+                  <label className="grid place-items-center">
+                    <input
+                      type="checkbox"
+                      checked={r.enabled !== false}
+                      onChange={(e) =>
+                        setHeaderRows((p) => p.map((x) => (x.id === r.id ? { ...x, enabled: e.target.checked } : x)))
+                      }
+                      title="Use this header when sending"
+                    />
+                  </label>
                   <input
                     value={r.key}
                     onChange={(e) =>
@@ -796,7 +1766,7 @@ export function ApiMode() {
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-xs font-bold text-slate-300">Fields</div>
                   <button
-                    onClick={() => setBodyFields((p) => [...p, { id: newId(), key: "", value: "" }])}
+                    onClick={() => setBodyFields((p) => [...p, { id: newId(), enabled: true, key: "", value: "" }])}
                     className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-extrabold text-slate-200 hover:bg-white/15"
                   >
                     + Add
@@ -899,6 +1869,7 @@ export function ApiMode() {
               Xóa log
             </button>
           </div>
+        </div>
         </div>
       </div>
 

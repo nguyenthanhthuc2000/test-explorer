@@ -25,6 +25,14 @@ export function App() {
   const [cfg, setCfg] = useState<AppConfig | null>(null);
   const hasQa = Boolean((window as unknown as { qa?: QaApi }).qa);
   const [mem, setMem] = useState<{ rssMb: number; heapMb: number } | null>(null);
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    try {
+      const raw = localStorage.getItem("ai-qa.theme");
+      return raw === "light" ? "light" : "dark";
+    } catch {
+      return "dark";
+    }
+  });
 
   React.useEffect(() => {
     let mounted = true;
@@ -55,53 +63,80 @@ export function App() {
     };
   }, []);
 
+  React.useEffect(() => {
+    try {
+      document.documentElement.dataset.theme = theme;
+      localStorage.setItem("ai-qa.theme", theme);
+    } catch {
+      // ignore
+    }
+  }, [theme]);
+
   const header = useMemo(() => {
     return (
       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <div className="text-lg font-extrabold tracking-tight">AI QA Desktop Tool</div>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-300">
+          <div className="text-lg font-extrabold tracking-tight text-(--app-fg)">AI QA Desktop Tool</div>
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-(--muted)">
             {mem ? (
               <>
-                <div className="rounded-full bg-white/10 px-2 py-0.5 font-extrabold text-slate-200">
+                <div className="rounded-full bg-(--btn) px-2 py-0.5 font-extrabold text-(--app-fg)">
                   RAM: {mem.rssMb}MB
                 </div>
-                <div className="rounded-full bg-white/10 px-2 py-0.5 font-extrabold text-slate-200">
+                <div className="rounded-full bg-(--btn) px-2 py-0.5 font-extrabold text-(--app-fg)">
                   Heap: {mem.heapMb}MB
                 </div>
               </>
             ) : (
-              <div className="text-slate-400">RAM/Heap: ...</div>
+              <div className="text-(--muted)">RAM/Heap: ...</div>
             )}
           </div>
         </div>
         <div className="flex items-center gap-2 text-xs">
           <button
-            className="rounded-lg bg-white/10 px-2 py-1 font-semibold text-slate-100 hover:bg-white/15"
+            type="button"
+            onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+            className={[
+              "relative h-7 w-14 rounded-full border p-0.5 transition-colors",
+              "border-(--border) bg-(--btn) hover:bg-(--btn-hover)"
+            ].join(" ")}
+            title="Toggle dark/light"
+            aria-label="Toggle dark/light"
+          >
+            <span
+              className={[
+                "block h-6 w-6 rounded-full transition-transform",
+                "bg-(--app-fg)",
+                theme === "dark" ? "translate-x-0" : "translate-x-7"
+              ].join(" ")}
+            />
+          </button>
+          <button
+            className="rounded-lg bg-(--btn) px-2 py-1 font-semibold text-(--app-fg) hover:bg-(--btn-hover)"
             onClick={() => setView({ name: "home" })}
           >
             Home
           </button>
           <button
-            className="rounded-lg bg-white/10 px-2 py-1 font-semibold text-slate-100 hover:bg-white/15"
+            className="rounded-lg bg-(--btn) px-2 py-1 font-semibold text-(--app-fg) hover:bg-(--btn-hover)"
             onClick={() => setView({ name: "web" })}
           >
             Test Web/UI
           </button>
           <button
-            className="rounded-lg bg-white/10 px-2 py-1 font-semibold text-slate-100 hover:bg-white/15"
+            className="rounded-lg bg-(--btn) px-2 py-1 font-semibold text-(--app-fg) hover:bg-(--btn-hover)"
             onClick={() => setView({ name: "api" })}
           >
             Test API
           </button>
           <button
-            className="rounded-lg bg-white/10 px-2 py-1 font-semibold text-slate-100 hover:bg-white/15"
+            className="rounded-lg bg-(--btn) px-2 py-1 font-semibold text-(--app-fg) hover:bg-(--btn-hover)"
             onClick={() => setView({ name: "settings" })}
           >
             Config
           </button>
           <button
-            className="rounded-lg bg-white/10 px-2 py-1 font-semibold text-slate-100 hover:bg-white/15"
+            className="rounded-lg bg-(--btn) px-2 py-1 font-semibold text-(--app-fg) hover:bg-(--btn-hover)"
             onClick={() => setView({ name: "history" })}
           >
             History
@@ -112,12 +147,12 @@ export function App() {
         </div>
       </div>
     );
-  }, [hasQa, mem]);
+  }, [hasQa, mem, theme]);
 
   return (
-    <div className="mx-auto max-w-5xl px-5 py-8">
+    <div className="mx-auto w-full max-w-[1400px] px-5 py-8">
       {header}
-      <div className="rounded-2xl border border-white/10 bg-white/5 p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.02)] backdrop-blur">
+      <div className="rounded-2xl border border-(--border) bg-(--surface) p-4 shadow-[0_0_0_1px_rgba(255,255,255,0.02)] backdrop-blur">
         {view.name === "api" ? (
           <ApiMode />
         ) : view.name === "web" ? (
