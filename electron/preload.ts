@@ -39,6 +39,14 @@ export type QaApi = {
     validations: Array<{ name: string; ok: boolean; details?: string }>;
   }>;
   generateApiScenarios: (input: { baseUrl: string; context?: string }) => Promise<string>;
+  generateApiBodyCases: (input: {
+    method: string;
+    url: string;
+    headers?: Record<string, string>;
+    bodyType?: "none" | "raw" | "json" | "form_urlencoded" | "form_data" | "binary";
+    bodyExample?: string;
+    context?: string;
+  }) => Promise<string>;
   getMetrics: () => Promise<{
     rssBytes: number;
     heapUsedBytes: number;
@@ -66,6 +74,7 @@ const qa: QaApi = {
   getRun: (id) => ipcRenderer.invoke(IPC_CHANNELS.getRun, { id }),
   runApi: (input) => ipcRenderer.invoke("run-api", input),
   generateApiScenarios: (input) => ipcRenderer.invoke("generate-api-scenarios", input),
+  generateApiBodyCases: (input) => ipcRenderer.invoke("generate-api-body-cases", input),
   getMetrics: () => ipcRenderer.invoke("get-metrics")
   ,
   clearHistory: () => ipcRenderer.invoke("clear-history"),

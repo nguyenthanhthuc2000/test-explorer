@@ -9,7 +9,7 @@ import { IPC_CHANNELS } from "./channels";
 import { env } from "../../config/env";
 import { getConfig } from "../../db/repository/config.repo";
 import { ollamaGenerate } from "../../ai/ollama";
-import { buildApiTestScenariosPrompt } from "../../ai/prompt";
+import { buildApiBodyCasesPrompt, buildApiTestScenariosPrompt } from "../../ai/prompt";
 import { CookieJar } from "tough-cookie";
 
 const cookieJars = new Map<string, CookieJar>();
@@ -217,9 +217,6 @@ export function registerTestIpc() {
 
   ipcMain.handle("generate-api-scenarios", async (_event, payload: { baseUrl: string; context?: string }) => {
     const cfg = getConfig();
-    if (!env.enableAi || !cfg.ai.enabled) {
-      throw new Error("AI đang tắt. Bật ENABLE_AI=true trong .env và bật 'Enable AI' trong Config.");
-    }
     if (!(cfg.ai.baseUrl ?? "").trim()) throw new Error("Chưa nhập Ollama Base URL.");
     if (!(cfg.ai.model ?? "").trim()) throw new Error("Chưa cấu hình Ollama model.");
 
@@ -234,10 +231,50 @@ export function registerTestIpc() {
       baseUrl: cfg.ai.baseUrl!.trim(),
       model: cfg.ai.model!.trim(),
       prompt,
-      stream: false
+      stream: false,
+      timeoutMs: Math.max(30_000, Math.trunc((Number(cfg.ai.ollamaTimeoutSec ?? 30) || 30) * 1000))
     });
     return out.response?.trim() ?? "";
   });
+
+  ipcMain.handle(
+    "generate-api-body-cases",
+    async (
+      _event,
+      payload: {
+        method: string;
+        url: string;
+        headers?: Record<string, string>;
+        bodyType?: "none" | "raw" | "json" | "form_urlencoded" | "form_data" | "binary";
+        bodyExample?: string;
+        context?: string;
+      }
+    ) => {
+      const cfg = getConfig();
+      if (!(cfg.ai.baseUrl ?? "").trim()) throw new Error("Chưa nhập Ollama Base URL.");
+      if (!(cfg.ai.model ?? "").trim()) throw new Error("Chưa cấu hình Ollama model.");
+
+      const maxCases = Math.max(1, Math.min(30, Math.trunc(cfg.ai.maxScenarios ?? 5)));
+      const prompt = buildApiBodyCasesPrompt({
+        method: String(payload.method ?? "POST").toUpperCase(),
+        url: String(payload.url ?? ""),
+        headers: payload.headers,
+        bodyType: payload.bodyType,
+        bodyExample: payload.bodyExample,
+        context: payload.context,
+        maxCases
+      });
+      console.log("prompt", prompt);
+      const out = await ollamaGenerate({
+        baseUrl: cfg.ai.baseUrl!.trim(),
+        model: cfg.ai.model!.trim(),
+        prompt,
+        stream: false,
+        timeoutMs: Math.max(700_000, Math.trunc((Number(cfg.ai.ollamaTimeoutSec ?? 30) || 30) * 10000))
+      });
+      return out.response?.trim() ?? "";
+    }
+  );
 
   ipcMain.handle("get-metrics", async () => {
     const mem = process.memoryUsage();

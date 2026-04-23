@@ -184,6 +184,7 @@ export function ApiMode() {
   });
   const tabsRef = useRef<{ tabs: ApiRequestTab[]; activeId: string }>({ tabs: [], activeId: "" });
   const responseLogsRef = useRef<HTMLDivElement | null>(null);
+  const scenarioCancelRef = useRef<{ cancel: boolean }>({ cancel: false });
   const [running, setRunning] = useState(false);
   const [expandedTabIds, setExpandedTabIds] = useState<Record<string, boolean>>({});
   const [selectedRunIdxByTabId, setSelectedRunIdxByTabId] = useState<Record<string, number>>({});
@@ -201,6 +202,12 @@ export function ApiMode() {
           at: string;
           method: string;
           url: string;
+          request?: {
+            bodyType?: "none" | "raw" | "json" | "form_urlencoded" | "form_data" | "binary";
+            bodyText?: string;
+            headers?: Record<string, string>;
+            expectStatus?: number;
+          };
           result: { ok: boolean; status: number; elapsedMs: number; bodyText: string; validations: Array<{ name: string; ok: boolean; details?: string }> };
         }>;
         logs: Array<{ at: string; method: string; url: string; ok: boolean; status: number; elapsedMs: number }>;
@@ -229,7 +236,6 @@ export function ApiMode() {
       return false;
     }
   });
-  const [scenarios, setScenarios] = useState<string>("");
   const [genLoading, setGenLoading] = useState(false);
   const [scenarioLimit, setScenarioLimit] = useState<number>(5);
   const [scenarioRunLoading, setScenarioRunLoading] = useState(false);
@@ -298,10 +304,30 @@ export function ApiMode() {
         const safeHistory = history.slice(0, 20).map((h: any) => {
           const r = h?.result ?? null;
           const bodyText = String(r?.bodyText ?? "");
+          const reqBodyText = String(h?.request?.bodyText ?? "");
+          const reqHeaders = h?.request?.headers && typeof h.request.headers === "object" ? h.request.headers : undefined;
           return {
             at: String(h?.at ?? ""),
             method: String(h?.method ?? ""),
             url: String(h?.url ?? ""),
+            request: h?.request
+              ? {
+                  bodyType: h.request.bodyType,
+                  expectStatus:
+                    h.request.expectStatus != null && Number.isFinite(Number(h.request.expectStatus))
+                      ? Number(h.request.expectStatus)
+                      : undefined,
+                  bodyText: reqBodyText.length > MAX_BODY ? reqBodyText.slice(0, MAX_BODY) : reqBodyText
+                  ,
+                  headers: reqHeaders
+                    ? Object.fromEntries(
+                        Object.entries(reqHeaders)
+                          .slice(0, 50)
+                          .map(([k, v]) => [String(k), String(v).slice(0, 2000)])
+                      )
+                    : undefined
+                }
+              : undefined,
             result: r
               ? {
                   ok: Boolean(r.ok),
@@ -320,6 +346,40 @@ export function ApiMode() {
       // ignore
     }
   }, [tabRuns]);
+
+  // AI scenarios (per tab)
+  type ApiBodyCase = { id: string; name: string; description: string; expectStatus?: number; body: string };
+  const [scenariosByTabId, setScenariosByTabId] = useState<Record<string, ApiBodyCase[]>>(() => {
+    try {
+      const raw = localStorage.getItem("ai-qa.api.scenarios.v1");
+      if (!raw) return {};
+      const parsed = JSON.parse(raw) as any;
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  });
+  const [scenarioModalOpen, setScenarioModalOpen] = useState(false);
+  const [scenarioModalTab, setScenarioModalTab] = useState<"context" | "example">("context");
+  const [scenarioContextDraft, setScenarioContextDraft] = useState<string>("");
+  const [scenarioDraftCases, setScenarioDraftCases] = useState<ApiBodyCase[]>([]);
+  const [scenarioDraftRaw, setScenarioDraftRaw] = useState<string>("");
+  const [scenarioRawOpen, setScenarioRawOpen] = useState<boolean>(false);
+  const [scenarioDraftErr, setScenarioDraftErr] = useState<string | null>(null);
+  const [retryingLogKey, setRetryingLogKey] = useState<string | null>(null);
+  const [reqBodyPreview, setReqBodyPreview] = useState<{ open: boolean; title: string; body: string }>({
+    open: false,
+    title: "",
+    body: ""
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("ai-qa.api.scenarios.v1", JSON.stringify(scenariosByTabId));
+    } catch {
+      // ignore
+    }
+  }, [scenariosByTabId]);
 
   // Guard against invalid state (prevents falling back to a fresh default tab)
   useEffect(() => {
@@ -423,6 +483,128 @@ export function ApiMode() {
         // ignore
       }
     }, 0);
+  }
+
+  function parseBodyCasesFromText(
+    text: string
+  ): { cases: Array<{ name: string; description: string; expectStatus?: number; body: string }>; error?: string } {
+    const raw = String(text ?? "").trim();
+    if (!raw) return { cases: [], error: "Nội dung trống." };
+    const jsonStart = raw.indexOf("{");
+    const jsonEnd = raw.lastIndexOf("}");
+    let jsonText = jsonStart >= 0 && jsonEnd >= 0 ? raw.slice(jsonStart, jsonEnd + 1) : raw;
+    // Common model mistakes: trailing commas, missing final brace when ending with ']'
+    jsonText = jsonText.replace(/,\s*([\]}])/g, "$1").trim();
+    if (jsonText.startsWith('{"cases":[') && jsonText.endsWith("]")) {
+      jsonText = jsonText + "}";
+    }
+    try {
+      const parsed = JSON.parse(jsonText) as any;
+      const cases = Array.isArray(parsed?.cases) ? parsed.cases : Array.isArray(parsed) ? parsed : [];
+      const out = cases
+        .map((c: any) => ({
+          name: String(c?.name ?? c?.title ?? "").trim(),
+          description: String(c?.description ?? c?.desc ?? c?.note ?? "").trim(),
+          expectStatus:
+            c?.expectStatus != null && Number.isFinite(Number(c.expectStatus)) ? Number(c.expectStatus) : undefined,
+          body: typeof c?.body === "string" ? c.body : JSON.stringify(c?.body ?? "", null, 2)
+        }))
+        .filter((c: any) => c.name || String(c.body ?? "").trim());
+      if (!out.length) return { cases: [], error: "Không parse được cases. Cần JSON dạng {\"cases\":[{\"name\":\"...\",\"body\":\"...\"}]}." };
+      return { cases: out };
+    } catch (e: any) {
+      return { cases: [], error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  function formatAtNoTz(input: any): string {
+    const s = String(input ?? "").trim();
+    if (!s) return "";
+    try {
+      const d = new Date(s);
+      if (Number.isNaN(d.getTime())) return s;
+      const pad = (n: number) => String(n).padStart(2, "0");
+      const yyyy = d.getFullYear();
+      const mm = pad(d.getMonth() + 1);
+      const dd = pad(d.getDate());
+      const hh = pad(d.getHours());
+      const mi = pad(d.getMinutes());
+      const ss = pad(d.getSeconds());
+      return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+    } catch {
+      return s;
+    }
+  }
+
+  function bodyExampleForAi(): string {
+    const bt = String(bodyText ?? "");
+    if (bodyType === "none") return "";
+    if (bodyType === "raw" || bodyType === "json") return bt;
+    if (bodyType === "form_urlencoded") {
+      const pairs = (bodyFields ?? [])
+        .filter((r: any) => r?.enabled !== false)
+        .map((r: any) => `${encodeURIComponent(String(r.key ?? ""))}=${encodeURIComponent(String(r.value ?? ""))}`)
+        .filter((s: string) => !/^=$/.test(s));
+      return pairs.join("&");
+    }
+    if (bodyType === "form_data") {
+      const obj: Record<string, string> = {};
+      for (const r of bodyFields ?? []) {
+        if (r?.enabled === false) continue;
+        const k = String(r?.key ?? "").trim();
+        if (!k) continue;
+        obj[k] = String(r?.value ?? "");
+      }
+      return JSON.stringify(obj, null, 2);
+    }
+    if (bodyType === "binary") {
+      return binary?.filename ? `@file:${binary.filename}` : "@file:(binary)";
+    }
+    return bt;
+  }
+
+  async function retryFromLog(input: {
+    tabId: string;
+    method: string;
+    url: string;
+    headers?: Record<string, string>;
+    bodyType?: "none" | "raw" | "json" | "form_urlencoded" | "form_data" | "binary";
+    bodyText?: string;
+    expectStatus?: number;
+  }) {
+    const key = `${input.tabId}:${input.method}:${input.url}`;
+    setRetryingLogKey(key);
+    try {
+      const at = new Date().toISOString();
+      const res = await qa().runApi({
+        method: input.method,
+        url: input.url,
+        headers: input.headers,
+        bodyType: input.bodyType,
+        bodyText: input.bodyText,
+        timeoutMs: safeActiveReq.timeoutMs,
+        expect: { status: input.expectStatus ?? safeActiveReq.expect.status, maxMs: safeActiveReq.expect.maxMs },
+        insecureTls: safeActiveReq.insecureTls,
+        useCookieJar: safeActiveReq.useCookieJar
+      });
+      setTabRuns((p) => {
+        const prev = p[input.tabId] ?? { logs: [] as any[], history: [] as any[] };
+        const nextLogs = [
+          { at, method: input.method, url: input.url, ok: res.ok, status: res.status, elapsedMs: res.elapsedMs },
+          ...(prev.logs ?? [])
+        ].slice(0, 200);
+        const nextHistory = [
+          { at, method: input.method, url: input.url, request: { bodyType: input.bodyType, bodyText: input.bodyText, headers: input.headers, expectStatus: input.expectStatus }, result: res },
+          ...((prev as any).history ?? [])
+        ].slice(0, 20);
+        return { ...p, [input.tabId]: { ...prev, logs: nextLogs, history: nextHistory, result: res, error: null } };
+      });
+      setSelectedRunIdxByTabId((p) => ({ ...p, [input.tabId]: 0 }));
+      setExpandedRunIdxByTabId((p) => ({ ...p, [input.tabId]: 0 }));
+      openAndScrollToResponse(input.tabId);
+    } finally {
+      setRetryingLogKey(null);
+    }
   }
 
   const filteredTabs = useMemo(() => {
@@ -620,7 +802,18 @@ export function ApiMode() {
           ...(prev.logs ?? [])
         ].slice(0, 60);
         const nextHistory = [
-          { at, method: safeActiveReq.method, url: finalUrl, result: res },
+          {
+            at,
+            method: safeActiveReq.method,
+            url: finalUrl,
+            request: {
+              bodyType: safeActiveReq.body.type,
+              bodyText: safeActiveReq.body.text,
+              headers: finalHeaders,
+              expectStatus: safeActiveReq.expect.status
+            },
+            result: res
+          },
           ...((prev as any).history ?? [])
         ].slice(0, 20);
         return { ...p, [safeActiveReq.id]: { ...prev, result: res, error: null, logs: nextLogs, history: nextHistory } };
@@ -639,26 +832,27 @@ export function ApiMode() {
   }
 
   async function generateScenarios() {
-    setGenLoading(true);
-    setTabRuns((p) => ({ ...p, [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: null } }));
-    try {
-      // also persist the limit into config so backend prompt uses it
-      try {
-        const cfg = await qa().getConfig();
-        await qa().setConfig({ ...cfg, ai: { ...cfg.ai, maxScenarios: scenarioLimit } });
-      } catch {
-        // ignore
-      }
-      const text = await qa().generateApiScenarios({ baseUrl: url, context: apiContext });
-      setScenarios(text);
-    } catch (e) {
-      setTabRuns((p) => ({
-        ...p,
-        [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: e instanceof Error ? e.message : String(e) }
-      }));
-    } finally {
-      setGenLoading(false);
-    }
+    // Open modal to require context & review before saving.
+    setScenarioModalTab("context");
+    setScenarioContextDraft((apiContext ?? "").trim());
+    const existing = scenariosByTabId[safeActiveReq.id] ?? [];
+    setScenarioDraftCases(
+      existing.length
+        ? existing
+        : [
+            {
+              id: newId(),
+              name: "Case 1",
+              description: "",
+              expectStatus: expectStatus ?? 200,
+              body: bodyExampleForAi() || ""
+            }
+          ]
+    );
+    setScenarioDraftRaw("");
+    setScenarioRawOpen(false);
+    setScenarioDraftErr(null);
+    setScenarioModalOpen(true);
   }
 
   function clearLogs() {
@@ -868,50 +1062,106 @@ export function ApiMode() {
   }
 
   async function runAllScenarios() {
+    const cases = scenariosByTabId[safeActiveReq.id] ?? [];
+    if (!cases.length) return;
+    scenarioCancelRef.current.cancel = false;
     setScenarioRunLoading(true);
     setExpandedTabIds((p) => ({ ...p, [safeActiveReq.id]: true }));
     setTabRuns((p) => ({ ...p, [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: null } }));
-    try {
-      const raw = scenarios.trim();
-      const jsonStart = raw.indexOf("{");
-      const jsonEnd = raw.lastIndexOf("}");
-      const jsonText = jsonStart >= 0 && jsonEnd >= 0 ? raw.slice(jsonStart, jsonEnd + 1) : "";
-      const parsed = JSON.parse(jsonText) as any;
-      const list = Array.isArray(parsed?.scenarios) ? parsed.scenarios.slice(0, scenarioLimit) : [];
-      if (list.length === 0) throw new Error("Chưa có scenarios JSON hợp lệ để chạy.");
+    openAndScrollToResponse(safeActiveReq.id);
 
-      for (let sIdx = 0; sIdx < list.length; sIdx++) {
-        const sc = list[sIdx];
-        const reqs = Array.isArray(sc?.requests) ? sc.requests : [];
-        const expects = Array.isArray(sc?.expects) ? sc.expects : [];
+    const concurrency = 3;
+    let nextIdx = 0;
+    const total = cases.length;
 
-        // Scenario header log (info-like)
-        setTabRuns((p) => {
-          const prev = p[safeActiveReq.id] ?? { logs: [] as any[] };
-          const nextLogs = [
-            { at: new Date().toISOString(), method: "SCENARIO", url: sc?.title ?? `#${sIdx + 1}`, ok: true, status: 0, elapsedMs: 0 },
-            ...(prev.logs ?? [])
-          ].slice(0, 200);
-          return { ...p, [safeActiveReq.id]: { ...prev, logs: nextLogs } };
-        });
+    function appendRunLog(
+      tabId: string,
+      entry: { at: string; method: string; url: string; ok: boolean; status: number; elapsedMs: number },
+      result?: any,
+      request?: { bodyType?: any; bodyText?: string; headers?: Record<string, string>; expectStatus?: number }
+    ) {
+      setTabRuns((p) => {
+        const prev = p[tabId] ?? { logs: [] as any[], history: [] as any[] };
+        const nextLogs = [entry, ...(prev.logs ?? [])].slice(0, 200);
+        const nextHistory = result
+          ? [{ at: entry.at, method: entry.method, url: entry.url, request, result }, ...((prev as any).history ?? [])].slice(0, 20)
+          : ((prev as any).history ?? []);
+        return { ...p, [tabId]: { ...prev, logs: nextLogs, history: nextHistory } };
+      });
+    }
 
-        for (let rIdx = 0; rIdx < reqs.length; rIdx++) {
-          const r = reqs[rIdx];
-          const exp = expects.find((e: any) => e?.requestIndex === rIdx) ?? {};
-          await runScenarioLog(
-            String(r?.method ?? "GET").toUpperCase(),
-            String(r?.url ?? url),
-            r?.headers ?? undefined,
-            r?.body ?? undefined,
-            { status: exp?.status, maxMs: exp?.maxMs }
+    appendRunLog(safeActiveReq.id, {
+      at: new Date().toISOString(),
+      method: "SCENARIO",
+      url: `Start ${total} cases`,
+      ok: true,
+      status: 0,
+      elapsedMs: 0
+    });
+
+    async function worker() {
+      while (true) {
+        if (scenarioCancelRef.current.cancel) return;
+        const i = nextIdx++;
+        if (i >= total) return;
+        const c = cases[i]!;
+        const at = new Date().toISOString();
+        const label = `${finalUrl} • ${c.name ?? `Case ${i + 1}`}`;
+        try {
+          const res = await qa().runApi({
+            method: safeActiveReq.method,
+            url: finalUrl,
+            headers: finalHeaders,
+            bodyType: safeActiveReq.body.type,
+            bodyText: c.body,
+            bodyFields: [],
+            binary: undefined,
+            timeoutMs: safeActiveReq.timeoutMs,
+            expect: { status: c.expectStatus ?? safeActiveReq.expect.status, maxMs: safeActiveReq.expect.maxMs },
+            insecureTls: safeActiveReq.insecureTls,
+            useCookieJar: safeActiveReq.useCookieJar
+          });
+          appendRunLog(
+            safeActiveReq.id,
+            { at, method: "SCENARIO", url: label, ok: res.ok, status: res.status, elapsedMs: res.elapsedMs },
+            res,
+            {
+              bodyType: safeActiveReq.body.type,
+              bodyText: c.body,
+              headers: finalHeaders,
+              expectStatus: c.expectStatus ?? safeActiveReq.expect.status
+            }
           );
+        } catch (e: any) {
+          const msg = e instanceof Error ? e.message : String(e);
+          appendRunLog(
+            safeActiveReq.id,
+            { at, method: "SCENARIO", url: label, ok: false, status: 0, elapsedMs: 0 },
+            { ok: false, status: 0, elapsedMs: 0, bodyText: msg, validations: [{ name: "error", ok: false, details: msg }] },
+            {
+              bodyType: safeActiveReq.body.type,
+              bodyText: c.body,
+              headers: finalHeaders,
+              expectStatus: c.expectStatus ?? safeActiveReq.expect.status
+            }
+          );
+        } finally {
+          // keep latest selected at 0 so user sees newest
+          setSelectedRunIdxByTabId((p) => ({ ...p, [safeActiveReq.id]: 0 }));
         }
       }
-    } catch (e) {
-      setTabRuns((p) => ({
-        ...p,
-        [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: e instanceof Error ? e.message : String(e) }
-      }));
+    }
+
+    try {
+      await Promise.all(Array.from({ length: Math.min(concurrency, total) }, () => worker()));
+      appendRunLog(safeActiveReq.id, {
+        at: new Date().toISOString(),
+        method: "SCENARIO",
+        url: scenarioCancelRef.current.cancel ? "Cancelled" : "Done",
+        ok: !scenarioCancelRef.current.cancel,
+        status: 0,
+        elapsedMs: 0
+      });
     } finally {
       setScenarioRunLoading(false);
     }
@@ -1273,6 +1523,407 @@ export function ApiMode() {
         </div>
       ) : null}
 
+      {reqBodyPreview.open ? (
+        <div className="fixed inset-0 z-60 bg-black/70" onMouseDown={() => setReqBodyPreview((p) => ({ ...p, open: false }))}>
+          <div
+            className="fixed left-1/2 top-1/2 w-[min(980px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-(--border) bg-slate-950 p-4 shadow-2xl"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <div className="min-w-0 truncate text-sm font-extrabold text-slate-100">{reqBodyPreview.title || "Request body"}</div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(reqBodyPreview.body ?? "");
+                    } catch {
+                      // ignore
+                    }
+                  }}
+                  className="rounded-xl bg-(--btn) px-3 py-1.5 text-xs font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                >
+                  Copy
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReqBodyPreview((p) => ({ ...p, open: false }))}
+                  className="rounded-xl bg-(--btn) px-3 py-1.5 text-xs font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+            <pre className="max-h-[70vh] overflow-auto rounded-xl border border-white/10 bg-black/30 p-3 text-xs font-bold text-slate-100 whitespace-pre-wrap wrap-break-word">
+              {reqBodyPreview.body ?? ""}
+            </pre>
+          </div>
+        </div>
+      ) : null}
+
+      {scenarioModalOpen ? (
+        <div className="fixed inset-0 z-60 bg-black/70" onMouseDown={() => setScenarioModalOpen(false)}>
+          <div
+            className="fixed left-1/2 top-1/2 w-[min(980px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-(--border) bg-slate-950 p-4 shadow-2xl"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <div className="text-sm font-extrabold text-slate-100">Tạo kịch bản test (Ollama)</div>
+              <button
+                type="button"
+                onClick={() => setScenarioModalOpen(false)}
+                className="rounded-xl bg-(--btn) px-3 py-1.5 text-xs font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="grid gap-3">
+              <div className="flex items-center gap-2 border-b border-white/10">
+                <button
+                  type="button"
+                  onClick={() => setScenarioModalTab("context")}
+                  className={[
+                    "relative -mb-px px-1 py-2 text-sm font-extrabold",
+                    scenarioModalTab === "context" ? "text-slate-100" : "text-slate-300 hover:text-slate-200"
+                  ].join(" ")}
+                >
+                  Context
+                  {scenarioModalTab === "context" ? <span className="absolute inset-x-0 bottom-0 h-0.5 bg-blue-400" /> : null}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setScenarioModalTab("example")}
+                  className={[
+                    "relative -mb-px px-1 py-2 text-sm font-extrabold",
+                    scenarioModalTab === "example" ? "text-slate-100" : "text-slate-300 hover:text-slate-200"
+                  ].join(" ")}
+                >
+                  Body (Đầy đủ)
+                  {scenarioModalTab === "example" ? <span className="absolute inset-x-0 bottom-0 h-0.5 bg-blue-400" /> : null}
+                </button>
+              </div>
+
+              {scenarioModalTab === "context" ? (
+                <label className="grid gap-1">
+                  <div className="text-xs font-bold text-slate-300">
+                    Context (bắt buộc) — mô tả chi tiết input/output để AI hiểu sâu hơn
+                  </div>
+                  <div className="text-[11px] font-bold text-slate-400">
+                    Gợi ý: mô tả mục tiêu endpoint, schema body, meaning từng field, rule validate, lỗi thường gặp, và response mong đợi (status + shape).
+                  </div>
+                  <textarea
+                    value={scenarioContextDraft}
+                    onChange={(e) => setScenarioContextDraft(e.target.value)}
+                    rows={6}
+                    className="w-full resize-y rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-xs font-bold text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/20"
+                    placeholder={[
+                      "Ví dụ:",
+                      "- Endpoint: PUT /system/notification_settings",
+                      "- Input body (JSON): { isPointDeadlineNotice:boolean, noticeDaysBefore:number, ... }",
+                      "- Rule: noticeDaysBefore >= 0; transferEmail là email hợp lệ; thiếu field -> 400",
+                      "- Auth/Cookie: cần jwt + csrf",
+                      "- Expected response: 200 JSON {success:true,...} hoặc 400/401 với message"
+                    ].join("\n")}
+                  />
+                </label>
+              ) : (
+                <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                  <div className="mb-2 text-xs font-extrabold text-slate-200">Input mặc định (từ request hiện tại)</div>
+                  <div className="grid gap-2 text-[11px] font-bold text-slate-300">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded bg-(--btn) px-2 py-0.5 text-slate-100">{String(method)}</span>
+                      <span className="truncate text-slate-200">{finalUrl || "(no url)"}</span>
+                    </div>
+                    <div className="grid gap-1">
+                      <div className="text-slate-400">Body example</div>
+                      <pre className="max-h-56 overflow-auto rounded-lg border border-white/10 bg-black/30 p-2 text-slate-100">
+                        {bodyExampleForAi() || "(none)"}
+                      </pre>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={genLoading || !scenarioContextDraft.trim()}
+                  onClick={async () => {
+                    setGenLoading(true);
+                    setScenarioDraftErr(null);
+                    try {
+                      // persist limit into config so backend uses it
+                      try {
+                        const cfg = await qa().getConfig();
+                        await qa().setConfig({ ...cfg, ai: { ...cfg.ai, maxScenarios: scenarioLimit } });
+                      } catch {
+                        // ignore
+                      }
+                      const text = await qa().generateApiBodyCases({
+                        method,
+                        url: finalUrl,
+                        // Keep prompt clean: headers/cookies are not needed for body-case generation.
+                        headers: { "content-type": finalHeaders["content-type"] ?? "application/json" },
+                        bodyType,
+                        bodyExample: bodyExampleForAi(),
+                        context: scenarioContextDraft
+                      });
+                      setScenarioDraftRaw(text);
+                      setScenarioRawOpen(true);
+                      const parsed = parseBodyCasesFromText(text);
+                      if (parsed.error) {
+                        setScenarioDraftErr(parsed.error);
+                        return;
+                      }
+                      const cases = parsed.cases.map((c) => ({
+                        id: newId(),
+                        name: c.name || "Case",
+                        description: c.description || "",
+                        expectStatus: c.expectStatus ?? (expectStatus ?? 200),
+                        body: c.body
+                      }));
+                      setScenarioDraftCases(cases);
+                    } catch (e) {
+                      setScenarioDraftErr(e instanceof Error ? e.message : String(e));
+                    } finally {
+                      setGenLoading(false);
+                    }
+                  }}
+                  className="rounded-xl bg-blue-500 px-4 py-2 text-xs font-extrabold text-white hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {genLoading ? "Generating..." : "Generate cases"}
+                </button>
+
+                <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
+                  Limit
+                  <input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={scenarioLimit}
+                    onChange={(e) => setScenarioLimit(Number(e.target.value))}
+                    className="w-20 rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-[11px] font-extrabold text-slate-100 outline-none focus:border-white/20"
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setScenarioDraftCases([]);
+                    setScenarioDraftRaw("");
+                    setScenarioRawOpen(false);
+                    setScenarioDraftErr(null);
+                  }}
+                  className="rounded-xl bg-(--btn) px-4 py-2 text-xs font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                >
+                  Clear
+                </button>
+              </div>
+
+              {scenarioDraftErr ? <div className="text-xs font-extrabold text-red-300">{scenarioDraftErr}</div> : null}
+
+              {scenarioDraftRaw.trim() ? (
+                <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setScenarioRawOpen((v) => !v)}
+                      className="flex items-center gap-2 text-left text-xs font-extrabold text-slate-200"
+                      title="Toggle raw output"
+                    >
+                      <span className="rounded bg-(--btn) px-2 py-0.5 text-[11px] font-extrabold text-(--app-fg)">
+                        {scenarioRawOpen ? "▾" : "▸"}
+                      </span>
+                      Raw AI output
+                      <span className="text-[11px] font-bold text-slate-400">(sửa rồi bấm Parse)</span>
+                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(scenarioDraftRaw);
+                          } catch {
+                            // ignore
+                          }
+                        }}
+                        className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                      >
+                        Copy
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const parsed = parseBodyCasesFromText(scenarioDraftRaw);
+                          if (parsed.error) {
+                            setScenarioDraftErr(parsed.error);
+                            return;
+                          }
+                          const cases = parsed.cases.map((c) => ({
+                            id: newId(),
+                            name: c.name || "Case",
+                            description: c.description || "",
+                            expectStatus: c.expectStatus ?? (expectStatus ?? 200),
+                            body: c.body
+                          }));
+                          setScenarioDraftCases(cases);
+                          setScenarioDraftErr(null);
+                        }}
+                        className="rounded-xl bg-blue-500 px-3 py-1.5 text-[11px] font-extrabold text-white hover:bg-blue-400"
+                      >
+                        Parse
+                      </button>
+                    </div>
+                  </div>
+                  {scenarioRawOpen ? (
+                    <textarea
+                      value={scenarioDraftRaw}
+                      onChange={(e) => setScenarioDraftRaw(e.target.value)}
+                      rows={8}
+                      className="w-full resize-y rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-xs font-bold text-slate-100 outline-none focus:border-white/20"
+                    />
+                  ) : null}
+                </div>
+              ) : null}
+
+              <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs font-extrabold text-slate-200">
+                    Cases: <span className="text-slate-100">{scenarioDraftCases.length}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setScenarioDraftCases((p) => [
+                          { id: newId(), name: `Case ${p.length + 1}`, description: "", expectStatus: expectStatus ?? 200, body: "" },
+                          ...p
+                        ])
+                      }
+                      className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                    >
+                      + Add case
+                    </button>
+                  </div>
+                </div>
+
+                {scenarioDraftCases.length ? (
+                  <div className="max-h-[45vh] overflow-auto">
+                    <div className="grid gap-2">
+                      {scenarioDraftCases.map((c, idx) => (
+                        <div key={c.id} className="rounded-xl border border-white/10 bg-black/30 p-3">
+                          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                            <div className="text-[11px] font-extrabold text-slate-200">#{idx + 1}</div>
+                            <button
+                              type="button"
+                              onClick={() => setScenarioDraftCases((p) => p.filter((x) => x.id !== c.id))}
+                              className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-red-300 hover:bg-(--btn-hover)"
+                            >
+                              Delete
+                            </button>
+                          </div>
+
+                          <div className="grid gap-2 md:grid-cols-[1fr_140px]">
+                            <label className="grid gap-1">
+                              <div className="text-[11px] font-bold text-slate-300">Name</div>
+                              <input
+                                value={c.name}
+                                onChange={(e) =>
+                                  setScenarioDraftCases((p) => p.map((x) => (x.id === c.id ? { ...x, name: e.target.value } : x)))
+                                }
+                                className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-100 outline-none focus:border-white/20"
+                              />
+                            </label>
+                            <label className="grid gap-1">
+                              <div className="text-[11px] font-bold text-slate-300">Expect status</div>
+                              <input
+                                type="number"
+                                value={c.expectStatus ?? (expectStatus ?? 200)}
+                                onChange={(e) =>
+                                  setScenarioDraftCases((p) =>
+                                    p.map((x) =>
+                                      x.id === c.id ? { ...x, expectStatus: Number(e.target.value) } : x
+                                    )
+                                  )
+                                }
+                                className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-100 outline-none focus:border-white/20"
+                              />
+                            </label>
+                          </div>
+
+                          <label className="mt-2 grid gap-1">
+                            <div className="text-[11px] font-bold text-slate-300">Description</div>
+                            <input
+                              value={c.description}
+                              onChange={(e) =>
+                                setScenarioDraftCases((p) => p.map((x) => (x.id === c.id ? { ...x, description: e.target.value } : x)))
+                              }
+                              className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-bold text-slate-100 outline-none focus:border-white/20"
+                              placeholder="Mô tả mục tiêu case và kỳ vọng"
+                            />
+                          </label>
+
+                          <label className="mt-2 grid gap-1">
+                            <div className="text-[11px] font-bold text-slate-300">Body</div>
+                            <textarea
+                              value={c.body}
+                              onChange={(e) =>
+                                setScenarioDraftCases((p) => p.map((x) => (x.id === c.id ? { ...x, body: e.target.value } : x)))
+                              }
+                              rows={5}
+                              className="w-full resize-y rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-bold text-slate-100 outline-none focus:border-white/20"
+                              placeholder="Request body (string)"
+                            />
+                          </label>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-[11px] font-bold text-(--muted)">Chưa có case nào. Bấm “Generate cases” hoặc “+ Add case”.</div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setScenarioModalOpen(false)}
+                  className="rounded-xl bg-(--btn) px-4 py-2 text-xs font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={!scenarioDraftCases.length}
+                  onClick={() => {
+                    const cleaned = scenarioDraftCases
+                      .map((c) => ({
+                        ...c,
+                        name: String(c.name ?? "").trim(),
+                        description: String(c.description ?? "").trim(),
+                        expectStatus:
+                          c.expectStatus != null && Number.isFinite(Number(c.expectStatus)) ? Number(c.expectStatus) : undefined,
+                        body: String(c.body ?? "")
+                      }))
+                      .filter((c) => c.name || c.body.trim());
+                    if (!cleaned.length) {
+                      setScenarioDraftErr("Không có case hợp lệ để lưu.");
+                      return;
+                    }
+                    setScenariosByTabId((p) => ({ ...p, [safeActiveReq.id]: cleaned }));
+                    setScenarioModalOpen(false);
+                  }}
+                  className="rounded-xl bg-emerald-400 px-4 py-2 text-xs font-extrabold text-slate-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  Confirm & Save
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="grid gap-3 md:grid-cols-[340px_1fr]">
         {/* Sidebar (Postman-like) */}
         <div className="flex h-[70vh] min-h-0 flex-col gap-3 rounded-2xl border border-(--border) bg-(--surface) p-3 md:h-[calc(100vh-260px)]">
@@ -1366,12 +2017,22 @@ export function ApiMode() {
           >
             {/* Root (no folder) */}
             {folderTree.requests.map((t) => (
-              <button
+              <div
                 key={t.id}
                 onClick={() => {
                   persistTabs();
                   setActiveRequestId(t.id);
                   setExpandedTabIds((p) => ({ ...p, [t.id]: true }));
+                }}
+                role="button"
+                tabIndex={0}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    persistTabs();
+                    setActiveRequestId(t.id);
+                    setExpandedTabIds((p) => ({ ...p, [t.id]: true }));
+                  }
                 }}
                 draggable
                 onDragStart={(e) => {
@@ -1442,7 +2103,7 @@ export function ApiMode() {
                     </div>
                   ) : null}
                 </div>
-              </button>
+              </div>
             ))}
 
             {/* Folder tree */}
@@ -1454,9 +2115,17 @@ export function ApiMode() {
                 const expanded = folderExpanded[node.path] ?? true;
                 return (
                   <div key={node.path} className="grid gap-1">
-                    <button
+                    <div
                       onClick={() => {
                         setFolderMenuPath((cur) => (cur === node.path ? null : cur));
+                      }}
+                      role="button"
+                      tabIndex={0}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          setFolderMenuPath((cur) => (cur === node.path ? null : cur));
+                        }
                       }}
                       draggable
                       onDragStart={(e) => {
@@ -1568,16 +2237,26 @@ export function ApiMode() {
                           </div>
                         ) : null}
                       </div>
-                    </button>
+                    </div>
                     {expanded ? (
                       <div className="grid gap-1">
                         {node.requests.map((t: ApiRequestTab) => (
-                          <button
+                          <div
                             key={t.id}
                             onClick={() => {
                               persistTabs();
                               setActiveRequestId(t.id);
                               setExpandedTabIds((p) => ({ ...p, [t.id]: true }));
+                            }}
+                            role="button"
+                            tabIndex={0}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                persistTabs();
+                                setActiveRequestId(t.id);
+                                setExpandedTabIds((p) => ({ ...p, [t.id]: true }));
+                              }
                             }}
                             draggable
                             onDragStart={(e) => {
@@ -1649,7 +2328,7 @@ export function ApiMode() {
                                 </div>
                               ) : null}
                             </div>
-                          </button>
+                          </div>
                         ))}
                         {children.map((c: any) => renderNode(c, depth + 1))}
                       </div>
@@ -2220,8 +2899,11 @@ export function ApiMode() {
                   disabled={genLoading}
                   className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover) disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {genLoading ? "Generating..." : "Tạo kịch bản test"}
+                  {genLoading ? "Generating..." : (scenariosByTabId[safeActiveReq.id]?.length ? "Sửa kịch bản" : "Tạo kịch bản test")}
                 </button>
+                <div className="text-[11px] font-bold text-slate-400">
+                  Saved: <span className="text-slate-200">{scenariosByTabId[safeActiveReq.id]?.length ?? 0}</span>
+                </div>
                 <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
                   Limit
                   <input
@@ -2235,11 +2917,22 @@ export function ApiMode() {
                 </label>
                 <button
                   onClick={runAllScenarios}
-                  disabled={scenarioRunLoading || !scenarios.trim()}
+                  disabled={scenarioRunLoading || !(scenariosByTabId[safeActiveReq.id]?.length)}
                   className="rounded-xl bg-emerald-400 px-3 py-2 text-[11px] font-extrabold text-slate-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {scenarioRunLoading ? "Running..." : "Chạy tất cả kịch bản test"}
                 </button>
+                {scenarioRunLoading ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      scenarioCancelRef.current.cancel = true;
+                    }}
+                    className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                  >
+                    Cancel
+                  </button>
+                ) : null}
               </div>
             </div>
           )}
@@ -2327,132 +3020,175 @@ export function ApiMode() {
             ) : null}
 
             {filteredHistory.length ? (
-              <div className="max-h-56 overflow-auto rounded-xl border border-(--border) bg-black/20 p-2">
-                <div className="grid gap-1">
-                  {filteredHistory.slice(0, 120).map((h: any, idx: number) => {
-                    const l = {
-                      at: h?.at,
-                      method: h?.method,
-                      url: h?.url,
-                      ok: Boolean(h?.result?.ok),
-                      status: Number(h?.result?.status ?? 0),
-                      elapsedMs: Number(h?.result?.elapsedMs ?? 0)
-                    };
-                    const isOpen = expandedIdx === idx;
-                    const r = h?.result;
-                    const bodyText = String(r?.bodyText ?? "");
-                    const hasBody = Boolean(bodyText.trim());
-                    return (
-                    <div key={idx} className="grid gap-1">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          // Keep selection within current filtered list; detail uses current selected entry anyway.
-                          setSelectedRunIdxByTabId((p) => ({ ...p, [safeActiveReq.id]: idx }));
-                          setExpandedRunIdxByTabId((p) => ({
-                            ...p,
-                            [safeActiveReq.id]: (p[safeActiveReq.id] ?? null) === idx ? null : idx
-                          }));
-                        }}
-                        className={[
-                          "flex w-full flex-wrap items-center justify-between gap-2 rounded-lg border border-white/10 bg-black/20 px-2 py-1.5 text-left hover:bg-black/30",
-                          selectedIdx === idx ? "outline outline-blue-400/60" : ""
-                        ].join(" ")}
-                      >
-                        <div className="min-w-0 text-[11px] font-bold text-slate-300">
-                          <span className="font-extrabold text-slate-100">{l.method}</span>{" "}
-                          <span className="truncate">{l.url}</span>
-                        </div>
-                        <div className="flex items-center gap-2 text-[11px] font-extrabold">
-                          {l.method === "SCENARIO" ? (
-                            <span className="rounded-full bg-fuchsia-300 px-2 py-0.5 text-slate-950">SCENARIO</span>
-                          ) : (
-                            <>
+              <div className="grid gap-2 rounded-xl border border-(--border) bg-black/20 p-2 md:grid-cols-[360px_1fr]">
+                {/* Left: list */}
+                <div className="max-h-[52vh] overflow-y-auto overflow-x-hidden rounded-xl border border-white/10 bg-black/20 p-2">
+                  <div className="grid gap-1">
+                    {filteredHistory.slice(0, 200).map((h: any, idx: number) => {
+                      const origIdx = Math.max(0, activeHistory.indexOf(h));
+                      const ok = Boolean(h?.result?.ok);
+                      const methodLabel = String(h?.method ?? "");
+                      const urlLabel = String(h?.url ?? "");
+                      const status = Number(h?.result?.status ?? 0);
+                      const ms = Number(h?.result?.elapsedMs ?? 0);
+                      const isActive = selectedIdx === origIdx;
+                      return (
+                        <button
+                          key={`${h?.at ?? idx}-${idx}`}
+                          type="button"
+                          onClick={() => setSelectedRunIdxByTabId((p) => ({ ...p, [safeActiveReq.id]: origIdx }))}
+                          className={[
+                            "grid w-full shrink-0 grid-cols-[minmax(0,1fr)_118px] items-start gap-2 rounded-xl border px-3 py-2 text-left",
+                            isActive ? "border-(--border) bg-(--btn)" : "border-(--border) bg-(--surface-2) hover:bg-(--btn)"
+                          ].join(" ")}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex min-w-0 items-center gap-2">
+                              <span className="shrink-0 rounded bg-(--btn) px-1.5 py-0.5 text-[11px] font-extrabold text-(--app-fg)">
+                                {methodLabel}
+                              </span>
+                              <span className="min-w-0 truncate text-xs font-extrabold text-(--app-fg)">{urlLabel}</span>
+                            </div>
+                            <div className="mt-1 truncate text-[11px] font-bold text-(--muted)">{formatAtNoTz(h?.at)}</div>
+                          </div>
+                          <div className="flex w-[118px] shrink-0 flex-col items-end gap-1">
+                            {methodLabel === "SCENARIO" ? (
+                              <span className="rounded-full bg-fuchsia-300 px-2 py-0.5 text-[11px] font-extrabold text-slate-950">
+                                SCENARIO
+                              </span>
+                            ) : (
                               <span
                                 className={[
-                                  "rounded-full px-2 py-0.5",
-                                  l.ok ? "bg-emerald-300 text-slate-950" : "bg-red-400 text-slate-950"
+                                  "rounded-full px-2 py-0.5 text-[11px] font-extrabold",
+                                  ok ? "bg-emerald-300 text-slate-950" : "bg-red-400 text-slate-950"
                                 ].join(" ")}
                               >
-                                {l.ok ? "PASS" : "FAIL"}
+                                {ok ? "PASS" : "FAIL"}
                               </span>
-                              <span className="rounded-full bg-white/10 px-2 py-0.5 text-slate-200">
-                                {l.status} • {l.elapsedMs}ms
-                              </span>
-                            </>
-                          )}
-                        </div>
-                      </button>
-                      {isOpen ? (
-                        <div className="rounded-xl border border-white/10 bg-black/20 p-3">
-                          <div className="mb-2 flex flex-wrap items-center gap-2">
-                            <div className="text-[11px] font-extrabold text-slate-200">{String(l.at ?? "")}</div>
-                            <div className="ml-auto flex flex-wrap gap-2">
-                              <button
-                                type="button"
-                                disabled={!hasBody}
-                                onClick={() => setPreview({ open: true, tabId: safeActiveReq.id, mode: "raw" })}
-                                className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover) disabled:cursor-not-allowed disabled:opacity-60"
-                              >
-                                Preview Raw
-                              </button>
-                              <button
-                                type="button"
-                                disabled={!hasBody}
-                                onClick={() => setPreview({ open: true, tabId: safeActiveReq.id, mode: "json" })}
-                                className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover) disabled:cursor-not-allowed disabled:opacity-60"
-                              >
-                                Preview JSON
-                              </button>
-                              <button
-                                type="button"
-                                disabled={!hasBody}
-                                onClick={() => setPreview({ open: true, tabId: safeActiveReq.id, mode: "html" })}
-                                className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover) disabled:cursor-not-allowed disabled:opacity-60"
-                              >
-                                Preview HTML
-                              </button>
-                              <button
-                                type="button"
-                                onClick={clearLogs}
-                                className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
-                              >
-                                Clear
-                              </button>
-                            </div>
+                            )}
+                            <span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-extrabold text-slate-200">
+                              {status} • {ms}ms
+                            </span>
                           </div>
-
-                          {Array.isArray(r?.validations) && r.validations.length ? (
-                            <div className="grid gap-1">
-                              <div className="text-xs font-extrabold text-slate-200">Validations</div>
-                              {r.validations.map((v: any, i: number) => (
-                                <div key={i} className="rounded-lg border border-white/10 bg-black/20 px-2 py-1.5">
-                                  <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <div className="text-[11px] font-extrabold text-slate-100">{String(v?.name ?? `#${i + 1}`)}</div>
-                                    <span
-                                      className={[
-                                        "rounded-full px-2 py-0.5 text-[11px] font-extrabold",
-                                        v?.ok ? "bg-emerald-300 text-slate-950" : "bg-red-400 text-slate-950"
-                                      ].join(" ")}
-                                    >
-                                      {v?.ok ? "PASS" : "FAIL"}
-                                    </span>
-                                  </div>
-                                  {v?.details ? (
-                                    <div className="mt-1 text-[11px] font-bold text-slate-400">{String(v.details)}</div>
-                                  ) : null}
-                                </div>
-                              ))}
-                            </div>
-                          ) : (
-                            <div className="text-[11px] font-bold text-(--muted)">Không có validations.</div>
-                          )}
-                        </div>
-                      ) : null}
-                    </div>
-                    );
-                  })}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
+
+                {/* Right: detail */}
+                {selectedEntry ? (
+                  <div className="max-h-[52vh] overflow-y-auto overflow-x-hidden rounded-xl border border-white/10 bg-black/20 p-3">
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <div className="text-xs font-extrabold text-slate-200">Detail</div>
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await retryFromLog({
+                              tabId: safeActiveReq.id,
+                              method: String(selectedEntry.method ?? safeActiveReq.method),
+                              url: String(selectedEntry.url ?? finalUrl),
+                              headers: selectedEntry.request?.headers ?? finalHeaders,
+                              bodyType: selectedEntry.request?.bodyType ?? safeActiveReq.body.type,
+                              bodyText: String(selectedEntry.request?.bodyText ?? ""),
+                              expectStatus: selectedEntry.request?.expectStatus ?? safeActiveReq.expect.status
+                            });
+                          }}
+                          className="rounded-xl bg-emerald-400 px-3 py-1.5 text-[11px] font-extrabold text-slate-950 hover:bg-emerald-300"
+                        >
+                          Retry
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!String(selectedEntry?.result?.bodyText ?? "").trim()}
+                          onClick={() => setPreview({ open: true, tabId: safeActiveReq.id, mode: "raw" })}
+                          className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover) disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Preview Raw
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!String(selectedEntry?.result?.bodyText ?? "").trim()}
+                          onClick={() => setPreview({ open: true, tabId: safeActiveReq.id, mode: "json" })}
+                          className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover) disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Preview JSON
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!String(selectedEntry?.result?.bodyText ?? "").trim()}
+                          onClick={() => setPreview({ open: true, tabId: safeActiveReq.id, mode: "html" })}
+                          className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover) disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Preview HTML
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="mb-3 text-[11px] font-bold text-slate-300">
+                      <span className="text-slate-400">At:</span> {formatAtNoTz(selectedEntry.at)}
+                    </div>
+
+                    {selectedEntry?.request?.bodyText ? (
+                      <div className="mb-3 rounded-xl border border-white/10 bg-black/20 p-3">
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                          <div className="text-xs font-extrabold text-slate-200">Request body</div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setReqBodyPreview({
+                                  open: true,
+                                  title: `${String(selectedEntry.method ?? "")} ${String(selectedEntry.url ?? "")}`.trim(),
+                                  body: String(selectedEntry.request?.bodyText ?? "")
+                                })
+                              }
+                              className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                            >
+                              View full
+                            </button>
+                          </div>
+                        </div>
+                        <pre className="max-h-56 overflow-y-auto overflow-x-hidden rounded-lg border border-white/10 bg-black/30 p-2 text-[11px] font-bold text-slate-100 whitespace-pre-wrap wrap-break-word">
+                          {String(selectedEntry.request?.bodyText ?? "")}
+                        </pre>
+                      </div>
+                    ) : null}
+
+                    {Array.isArray(selectedEntry?.result?.validations) && selectedEntry.result.validations.length ? (
+                      <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                        <div className="mb-2 text-xs font-extrabold text-slate-200">Validations</div>
+                        <div className="grid gap-1">
+                          {selectedEntry.result.validations.map((v: any, i: number) => (
+                            <div key={i} className="rounded-lg border border-white/10 bg-black/20 px-2 py-1.5">
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="text-[11px] font-extrabold text-slate-100">{String(v?.name ?? `#${i + 1}`)}</div>
+                                <span
+                                  className={[
+                                    "rounded-full px-2 py-0.5 text-[11px] font-extrabold",
+                                    v?.ok ? "bg-emerald-300 text-slate-950" : "bg-red-400 text-slate-950"
+                                  ].join(" ")}
+                                >
+                                  {v?.ok ? "PASS" : "FAIL"}
+                                </span>
+                              </div>
+                              {v?.details ? (
+                                <div className="mt-1 text-[11px] font-bold text-slate-400">{String(v.details)}</div>
+                              ) : null}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-[11px] font-bold text-(--muted)">Không có validations.</div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="rounded-xl border border-white/10 bg-black/20 p-3 text-[11px] font-bold text-(--muted)">
+                    Click 1 log để xem detail.
+                  </div>
+                )}
               </div>
             ) : null}
           </div>
@@ -2460,12 +3196,6 @@ export function ApiMode() {
       </div>
 
       {/* Logs/results are shown in main detail (per active tab). */}
-
-      {scenarios ? (
-        <pre className="max-h-80 overflow-auto rounded-xl border border-white/10 bg-black/30 p-3 text-sm text-slate-100">
-          {scenarios}
-        </pre>
-      ) : null}
     </div>
   );
 }

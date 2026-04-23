@@ -4,6 +4,7 @@ export type OllamaGenerateRequest = {
   prompt: string;
   system?: string;
   stream?: boolean;
+  timeoutMs?: number;
 };
 
 export type OllamaGenerateResponse = {
@@ -36,18 +37,48 @@ export async function ollamaGenerate(req: OllamaGenerateRequest): Promise<Ollama
   const model = req.model.trim();
   if (!model) throw new Error("Chưa cấu hình Ollama model.");
 
-  const url = new URL("/api/generate", baseUrl).toString();
+  function urlFor(base: string) {
+    return new URL("/api/generate", base).toString();
+  }
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model,
-      prompt: req.prompt,
-      system: req.system,
-      stream: req.stream ?? false
-    })
-  });
+  const timeoutMs = Number.isFinite(req.timeoutMs as number) ? Math.max(1000, Math.trunc(req.timeoutMs as number)) : 30_000;
+  async function doFetch(url: string) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      return await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "llama3.2",
+          prompt: req.prompt,
+          system: req.system,
+          stream: req.stream ?? false
+        }),
+        signal: ctrl.signal
+      });
+    } catch (e: any) {
+      if (e?.name === "AbortError") {
+        throw new Error(`Ollama timeout sau ${timeoutMs}ms. Hãy tăng Ollama timeout trong Config.`);
+      }
+      throw e;
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  let res: Response;
+  try {
+    res = await doFetch(urlFor(baseUrl));
+  } catch (e: any) {
+    // Common on macOS: localhost resolves to ::1 but Ollama binds IPv4 only.
+    if ((baseUrl ?? "").includes("localhost")) {
+      const base2 = baseUrl.replace("localhost", "127.0.0.1");
+      res = await doFetch(urlFor(base2));
+    } else {
+      throw e;
+    }
+  }
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");

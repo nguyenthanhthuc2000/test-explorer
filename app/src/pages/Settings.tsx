@@ -205,7 +205,7 @@ export function Settings() {
                 {label(conn.ollama.status)}
               </span>
             </div>
-            <div className="grid gap-2 md:grid-cols-1">
+            <div className="grid gap-2 md:grid-cols-2">
               <label className="grid gap-1">
                 <div className="text-xs font-bold text-slate-300">Base URL</div>
                 <input
@@ -213,6 +213,15 @@ export function Settings() {
                   onChange={(e) => setCfg((c) => ({ ...c, ai: { ...c.ai, baseUrl: e.target.value } }))}
                   className="rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
                   placeholder="http://localhost:11434"
+                />
+              </label>
+              <label className="grid gap-1">
+                <div className="text-xs font-bold text-slate-300">Model</div>
+                <input
+                  value={cfg.ai.model ?? defaultConfig.ai.model}
+                  onChange={(e) => setCfg((c) => ({ ...c, ai: { ...c.ai, model: e.target.value } }))}
+                  className="rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
+                  placeholder="llama3.2"
                 />
               </label>
               <label className="grid gap-1">
@@ -254,7 +263,7 @@ export function Settings() {
                         ollamaTimeoutSec: clampFloat(
                           Number(cfg.ai.ollamaTimeoutSec ?? defaultConfig.ai.ollamaTimeoutSec ?? 0.1),
                           0.1,
-                          60
+                          600
                         ),
                         maxScenarios: clampInt(cfg.ai.maxScenarios ?? defaultConfig.ai.maxScenarios, 1, 30),
                         scenarioHint: cfg.ai.scenarioHint ?? ""
