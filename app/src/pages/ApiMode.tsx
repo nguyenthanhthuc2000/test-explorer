@@ -31,6 +31,8 @@ type ApiRequestTab = {
   };
   expect: { status: number; maxMs: number };
   timeoutMs: number;
+  insecureTls: boolean;
+  useCookieJar: boolean;
 };
 
 function rowsToHeaders(rows: HeaderRow[]): Record<string, string> {
@@ -62,7 +64,10 @@ function newDefaultApiTab(): ApiRequestTab {
       binary: null
     },
     expect: { status: 200, maxMs: 3000 },
-    timeoutMs: 5000
+    timeoutMs: 5000,
+    insecureTls: false
+    ,
+    useCookieJar: true
   };
 }
 
@@ -122,7 +127,9 @@ function normalizeTab(t: any, fallbackName: string): ApiRequestTab {
       status: Number.isFinite(t?.expect?.status) ? Number(t.expect.status) : base.expect.status,
       maxMs: Number.isFinite(t?.expect?.maxMs) ? Number(t.expect.maxMs) : base.expect.maxMs
     },
-    timeoutMs: Number.isFinite(t?.timeoutMs) ? Number(t.timeoutMs) : base.timeoutMs
+    timeoutMs: Number.isFinite(t?.timeoutMs) ? Number(t.timeoutMs) : base.timeoutMs,
+    insecureTls: typeof t?.insecureTls === "boolean" ? t.insecureTls : base.insecureTls,
+    useCookieJar: typeof t?.useCookieJar === "boolean" ? t.useCookieJar : base.useCookieJar
   };
 }
 
@@ -176,18 +183,63 @@ export function ApiMode() {
     return { tabs: [t], activeRequestId: t.id };
   });
   const tabsRef = useRef<{ tabs: ApiRequestTab[]; activeId: string }>({ tabs: [], activeId: "" });
+  const responseLogsRef = useRef<HTMLDivElement | null>(null);
   const [running, setRunning] = useState(false);
-  const [result, setResult] = useState<any>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [logs, setLogs] = useState<
-    Array<{ at: string; method: string; url: string; ok: boolean; status: number; elapsedMs: number }>
-  >([]);
+  const [expandedTabIds, setExpandedTabIds] = useState<Record<string, boolean>>({});
+  const [selectedRunIdxByTabId, setSelectedRunIdxByTabId] = useState<Record<string, number>>({});
+  const [expandedRunIdxByTabId, setExpandedRunIdxByTabId] = useState<Record<string, number | null>>({});
+  const [logFiltersByTabId, setLogFiltersByTabId] = useState<Record<string, { status: "all" | "pass" | "fail"; q: string }>>(
+    () => ({})
+  );
+  const [tabRuns, setTabRuns] = useState<
+    Record<
+      string,
+      {
+        error?: string | null;
+        result?: { ok: boolean; status: number; elapsedMs: number; bodyText: string; validations: Array<{ name: string; ok: boolean; details?: string }> } | null;
+        history?: Array<{
+          at: string;
+          method: string;
+          url: string;
+          result: { ok: boolean; status: number; elapsedMs: number; bodyText: string; validations: Array<{ name: string; ok: boolean; details?: string }> };
+        }>;
+        logs: Array<{ at: string; method: string; url: string; ok: boolean; status: number; elapsedMs: number }>;
+      }
+    >
+  >(() => {
+    try {
+      const raw = localStorage.getItem("ai-qa.api.runs.v1");
+      if (!raw) return {};
+      const parsed = JSON.parse(raw) as any;
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  });
+  const [preview, setPreview] = useState<{ open: boolean; tabId: string; mode: "raw" | "json" | "html" }>({
+    open: false,
+    tabId: "",
+    mode: "raw"
+  });
   const [scenarios, setScenarios] = useState<string>("");
   const [genLoading, setGenLoading] = useState(false);
   const [scenarioLimit, setScenarioLimit] = useState<number>(5);
   const [scenarioRunLoading, setScenarioRunLoading] = useState(false);
   const [metrics, setMetrics] = useState<any>(null);
   const [metricsError, setMetricsError] = useState<string | null>(null);
+
+  const previewState = preview.open ? tabRuns[preview.tabId] : null;
+  const previewBody = String(previewState?.result?.bodyText ?? "");
+  const previewJson =
+    preview.mode === "json"
+      ? (() => {
+          try {
+            return JSON.stringify(JSON.parse(previewBody), null, 2);
+          } catch {
+            return null;
+          }
+        })()
+      : null;
 
   useEffect(() => {
     let mounted = true;
@@ -219,6 +271,39 @@ export function ApiMode() {
       clearInterval(t);
     };
   }, []);
+
+  useEffect(() => {
+    // Persist per-tab response/log history
+    try {
+      const MAX_BODY = 120_000;
+      const sanitized: any = {};
+      for (const [tabId, st] of Object.entries(tabRuns ?? {})) {
+        const history = Array.isArray((st as any).history) ? (st as any).history : [];
+        const safeHistory = history.slice(0, 20).map((h: any) => {
+          const r = h?.result ?? null;
+          const bodyText = String(r?.bodyText ?? "");
+          return {
+            at: String(h?.at ?? ""),
+            method: String(h?.method ?? ""),
+            url: String(h?.url ?? ""),
+            result: r
+              ? {
+                  ok: Boolean(r.ok),
+                  status: Number(r.status ?? 0),
+                  elapsedMs: Number(r.elapsedMs ?? 0),
+                  bodyText: bodyText.length > MAX_BODY ? bodyText.slice(0, MAX_BODY) : bodyText,
+                  validations: Array.isArray(r.validations) ? r.validations : []
+                }
+              : null
+          };
+        });
+        sanitized[tabId] = { logs: Array.isArray((st as any).logs) ? (st as any).logs.slice(0, 200) : [], history: safeHistory };
+      }
+      localStorage.setItem("ai-qa.api.runs.v1", JSON.stringify(sanitized));
+    } catch {
+      // ignore
+    }
+  }, [tabRuns]);
 
   // Guard against invalid state (prevents falling back to a fresh default tab)
   useEffect(() => {
@@ -276,6 +361,53 @@ export function ApiMode() {
 
   const activeReq = useMemo(() => tabs.find((t) => t.id === activeRequestId) ?? tabs[0]!, [tabs, activeRequestId]);
   const safeActiveReq = activeReq;
+
+  const activeRun = tabRuns[safeActiveReq.id] ?? { logs: [], result: null, error: null, history: [] as any[] };
+  const activeHistory = (activeRun as any).history ?? [];
+  const activeFilter = logFiltersByTabId[safeActiveReq.id] ?? { status: "all" as const, q: "" };
+  const selectedIdx = selectedRunIdxByTabId[safeActiveReq.id] ?? 0;
+  const selectedEntry = activeHistory[selectedIdx] ?? null;
+  const activeResult = (selectedEntry?.result ?? activeRun.result) as any;
+  const activeBody = String(activeResult?.bodyText ?? "");
+  const activeHasBody = Boolean(activeBody.trim());
+  const resultOpen = expandedTabIds[safeActiveReq.id] ?? true;
+  const expandedIdx = expandedRunIdxByTabId[safeActiveReq.id] ?? null;
+
+  const logStats = useMemo(() => {
+    let pass = 0;
+    let fail = 0;
+    for (const h of activeHistory) {
+      if (h?.result?.ok) pass++;
+      else fail++;
+    }
+    return { total: activeHistory.length, pass, fail };
+  }, [activeHistory]);
+
+  const filteredHistory = useMemo(() => {
+    const q = (activeFilter.q ?? "").trim().toLowerCase();
+    const want = activeFilter.status ?? "all";
+    const out = activeHistory.filter((h: any) => {
+      const ok = Boolean(h?.result?.ok);
+      if (want === "pass" && !ok) return false;
+      if (want === "fail" && ok) return false;
+      if (!q) return true;
+      const hay = `${h?.method ?? ""} ${h?.url ?? ""} ${h?.result?.status ?? ""}`.toLowerCase();
+      return hay.includes(q);
+    });
+    return out.slice(0, 200);
+  }, [activeHistory, activeFilter.q, activeFilter.status]);
+
+  function openAndScrollToResponse(tabId: string) {
+    setExpandedTabIds((p) => ({ ...p, [tabId]: true }));
+    // next tick after layout update
+    setTimeout(() => {
+      try {
+        responseLogsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      } catch {
+        // ignore
+      }
+    }, 0);
+  }
 
   const filteredTabs = useMemo(() => {
     const q = reqQuery.trim().toLowerCase();
@@ -405,6 +537,8 @@ export function ApiMode() {
   const expectStatus = safeActiveReq.expect.status;
   const maxMs = safeActiveReq.expect.maxMs;
   const timeoutMs = safeActiveReq.timeoutMs;
+  const insecureTls = safeActiveReq.insecureTls;
+  const useCookieJar = safeActiveReq.useCookieJar;
 
   const activeTab = activePanel;
   const setActiveTab = setActivePanel;
@@ -429,17 +563,25 @@ export function ApiMode() {
   const setExpectStatus = (n: number) => updateActive((t) => ({ ...t, expect: { ...t.expect, status: n } }));
   const setMaxMs = (n: number) => updateActive((t) => ({ ...t, expect: { ...t.expect, maxMs: n } }));
   const setTimeoutMs = (n: number) => updateActive((t) => ({ ...t, timeoutMs: n }));
+  const setInsecureTls = (v: boolean) => updateActive((t) => ({ ...t, insecureTls: v }));
+  const setUseCookieJar = (v: boolean) => updateActive((t) => ({ ...t, useCookieJar: v }));
 
   // (rename removed)
 
   async function run() {
     if ((finalUrl ?? "").startsWith("grpc://") || (finalUrl ?? "").startsWith("grpcs://")) {
-      setError("Chưa hỗ trợ chạy gRPC. Bạn vẫn có thể import gRPCurl để lưu/spec, nhưng Send chỉ hỗ trợ HTTP(S).");
+      setTabRuns((p) => ({
+        ...p,
+        [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: "Chưa hỗ trợ chạy gRPC. Send chỉ hỗ trợ HTTP(S)." }
+      }));
       return;
     }
     setRunning(true);
-    setError(null);
-    setResult(null);
+    setExpandedTabIds((p) => ({ ...p, [safeActiveReq.id]: true }));
+    setTabRuns((p) => ({
+      ...p,
+      [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: null, result: null }
+    }));
     try {
       const res = await qa().runApi({
         method: safeActiveReq.method,
@@ -450,15 +592,31 @@ export function ApiMode() {
         bodyFields: (safeActiveReq.body.fields ?? []).map((x) => ({ key: x.key, value: x.value })),
         binary: safeActiveReq.body.binary ?? undefined,
         timeoutMs: safeActiveReq.timeoutMs,
-        expect: { status: safeActiveReq.expect.status, maxMs: safeActiveReq.expect.maxMs }
+        expect: { status: safeActiveReq.expect.status, maxMs: safeActiveReq.expect.maxMs },
+        insecureTls: safeActiveReq.insecureTls,
+        useCookieJar: safeActiveReq.useCookieJar
       });
-      setResult(res);
-      setLogs((prev) => [
-        { at: new Date().toISOString(), method: safeActiveReq.method, url: finalUrl, ok: res.ok, status: res.status, elapsedMs: res.elapsedMs },
-        ...prev
-      ].slice(0, 30));
+      setTabRuns((p) => {
+        const prev = p[safeActiveReq.id] ?? { logs: [] as any[] };
+        const at = new Date().toISOString();
+        const nextLogs = [
+          { at, method: safeActiveReq.method, url: finalUrl, ok: res.ok, status: res.status, elapsedMs: res.elapsedMs },
+          ...(prev.logs ?? [])
+        ].slice(0, 60);
+        const nextHistory = [
+          { at, method: safeActiveReq.method, url: finalUrl, result: res },
+          ...((prev as any).history ?? [])
+        ].slice(0, 20);
+        return { ...p, [safeActiveReq.id]: { ...prev, result: res, error: null, logs: nextLogs, history: nextHistory } };
+      });
+      setSelectedRunIdxByTabId((p) => ({ ...p, [safeActiveReq.id]: 0 }));
+      setExpandedRunIdxByTabId((p) => ({ ...p, [safeActiveReq.id]: null }));
+      openAndScrollToResponse(safeActiveReq.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setTabRuns((p) => ({
+        ...p,
+        [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: e instanceof Error ? e.message : String(e) }
+      }));
     } finally {
       setRunning(false);
     }
@@ -466,7 +624,7 @@ export function ApiMode() {
 
   async function generateScenarios() {
     setGenLoading(true);
-    setError(null);
+    setTabRuns((p) => ({ ...p, [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: null } }));
     try {
       // also persist the limit into config so backend prompt uses it
       try {
@@ -478,16 +636,19 @@ export function ApiMode() {
       const text = await qa().generateApiScenarios({ baseUrl: url, context: apiContext });
       setScenarios(text);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setTabRuns((p) => ({
+        ...p,
+        [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: e instanceof Error ? e.message : String(e) }
+      }));
     } finally {
       setGenLoading(false);
     }
   }
 
   function clearLogs() {
-    setLogs([]);
-    setResult(null);
-    setError(null);
+    setTabRuns((p) => ({ ...p, [safeActiveReq.id]: { logs: [], result: null, error: null, history: [] } }));
+    setSelectedRunIdxByTabId((p) => ({ ...p, [safeActiveReq.id]: 0 }));
+    setExpandedRunIdxByTabId((p) => ({ ...p, [safeActiveReq.id]: null }));
   }
 
   function detectImportKindFromFilename(name: string): ImportKind {
@@ -678,16 +839,22 @@ export function ApiMode() {
 
   async function runScenarioLog(method: string, url: string, headers?: Record<string, string>, body?: string, expect?: any) {
     const res = await qa().runApi({ method, url, headers, bodyType: "raw", bodyText: body, timeoutMs, expect });
-    setLogs((prev) => [
-      { at: new Date().toISOString(), method, url, ok: res.ok, status: res.status, elapsedMs: res.elapsedMs },
-      ...prev
-    ].slice(0, 200));
+    // Keep scenario logs in the active tab scope
+    setTabRuns((p) => {
+      const prev = p[safeActiveReq.id] ?? { logs: [] as any[] };
+      const nextLogs = [
+        { at: new Date().toISOString(), method, url, ok: res.ok, status: res.status, elapsedMs: res.elapsedMs },
+        ...(prev.logs ?? [])
+      ].slice(0, 200);
+      return { ...p, [safeActiveReq.id]: { ...prev, logs: nextLogs } };
+    });
     return res;
   }
 
   async function runAllScenarios() {
     setScenarioRunLoading(true);
-    setError(null);
+    setExpandedTabIds((p) => ({ ...p, [safeActiveReq.id]: true }));
+    setTabRuns((p) => ({ ...p, [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: null } }));
     try {
       const raw = scenarios.trim();
       const jsonStart = raw.indexOf("{");
@@ -703,10 +870,14 @@ export function ApiMode() {
         const expects = Array.isArray(sc?.expects) ? sc.expects : [];
 
         // Scenario header log (info-like)
-        setLogs((prev) => [
-          { at: new Date().toISOString(), method: "SCENARIO", url: sc?.title ?? `#${sIdx + 1}`, ok: true, status: 0, elapsedMs: 0 },
-          ...prev
-        ].slice(0, 200));
+        setTabRuns((p) => {
+          const prev = p[safeActiveReq.id] ?? { logs: [] as any[] };
+          const nextLogs = [
+            { at: new Date().toISOString(), method: "SCENARIO", url: sc?.title ?? `#${sIdx + 1}`, ok: true, status: 0, elapsedMs: 0 },
+            ...(prev.logs ?? [])
+          ].slice(0, 200);
+          return { ...p, [safeActiveReq.id]: { ...prev, logs: nextLogs } };
+        });
 
         for (let rIdx = 0; rIdx < reqs.length; rIdx++) {
           const r = reqs[rIdx];
@@ -721,7 +892,10 @@ export function ApiMode() {
         }
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setTabRuns((p) => ({
+        ...p,
+        [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: e instanceof Error ? e.message : String(e) }
+      }));
     } finally {
       setScenarioRunLoading(false);
     }
@@ -895,6 +1069,7 @@ export function ApiMode() {
                           fields: bodyFields
                         },
                         timeoutMs: Number.isFinite(r.timeoutMs as number) ? Number(r.timeoutMs) : base.timeoutMs,
+                        insecureTls: Boolean(r.insecureTls) || base.insecureTls,
                         expect: {
                           status: Number.isFinite(r.expect?.status as number) ? Number(r.expect!.status) : base.expect.status,
                           maxMs: Number.isFinite(r.expect?.maxMs as number) ? Number(r.expect!.maxMs) : base.expect.maxMs
@@ -1006,6 +1181,82 @@ export function ApiMode() {
         </div>
       ) : null}
 
+      {preview.open ? (
+        <div
+          className="fixed inset-0 z-60 bg-black/70"
+          onMouseDown={() => setPreview((p) => ({ ...p, open: false }))}
+        >
+          <div
+            className="fixed left-1/2 top-1/2 w-[min(980px,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-(--border) bg-slate-950 p-4 shadow-2xl"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <div className="text-sm font-extrabold text-slate-100">Preview</div>
+              <button
+                type="button"
+                onClick={() => setPreview((p) => ({ ...p, open: false }))}
+                className="rounded-xl bg-(--btn) px-3 py-1.5 text-xs font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPreview((p) => ({ ...p, mode: "raw" }))}
+                className={[
+                  "rounded-xl px-3 py-1.5 text-xs font-extrabold",
+                  preview.mode === "raw" ? "bg-blue-500 text-white" : "bg-(--btn) text-(--app-fg) hover:bg-(--btn-hover)"
+                ].join(" ")}
+              >
+                Raw
+              </button>
+              <button
+                type="button"
+                onClick={() => setPreview((p) => ({ ...p, mode: "json" }))}
+                className={[
+                  "rounded-xl px-3 py-1.5 text-xs font-extrabold",
+                  preview.mode === "json" ? "bg-blue-500 text-white" : "bg-(--btn) text-(--app-fg) hover:bg-(--btn-hover)"
+                ].join(" ")}
+              >
+                JSON
+              </button>
+              <button
+                type="button"
+                onClick={() => setPreview((p) => ({ ...p, mode: "html" }))}
+                className={[
+                  "rounded-xl px-3 py-1.5 text-xs font-extrabold",
+                  preview.mode === "html" ? "bg-blue-500 text-white" : "bg-(--btn) text-(--app-fg) hover:bg-(--btn-hover)"
+                ].join(" ")}
+              >
+                HTML
+              </button>
+              <div className="ml-auto text-[11px] font-bold text-slate-400">
+                Tab: <span className="text-slate-200">{preview.tabId || "-"}</span>
+              </div>
+            </div>
+
+            {preview.mode === "html" ? (
+              <div className="h-[60vh] overflow-hidden rounded-xl border border-white/10 bg-black/30">
+                <iframe
+                  title="html-preview"
+                  sandbox=""
+                  className="h-full w-full"
+                  srcDoc={previewBody}
+                />
+              </div>
+            ) : (
+              <pre className="max-h-[60vh] overflow-auto rounded-xl border border-white/10 bg-black/30 p-3 text-xs text-slate-100">
+                {preview.mode === "json"
+                  ? previewJson ?? "Body không phải JSON hợp lệ để preview."
+                  : previewBody}
+              </pre>
+            )}
+          </div>
+        </div>
+      ) : null}
+
       <div className="grid gap-3 md:grid-cols-[340px_1fr]">
         {/* Sidebar (Postman-like) */}
         <div className="flex h-[70vh] min-h-0 flex-col gap-3 rounded-2xl border border-(--border) bg-(--surface) p-3 md:h-[calc(100vh-260px)]">
@@ -1104,6 +1355,7 @@ export function ApiMode() {
                 onClick={() => {
                   persistTabs();
                   setActiveRequestId(t.id);
+                  setExpandedTabIds((p) => ({ ...p, [t.id]: true }));
                 }}
                 draggable
                 onDragStart={(e) => {
@@ -1132,6 +1384,19 @@ export function ApiMode() {
                   <div className="mt-1 truncate text-[11px] font-bold text-(--muted)">{t.url || "(no url)"}</div>
                 </div>
                 <div className="relative flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      persistTabs();
+                      setActiveRequestId(t.id);
+                      openAndScrollToResponse(t.id);
+                    }}
+                    className="rounded-lg bg-(--btn) px-2 py-0.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                    title="Xổ xuống Response/Logs"
+                  >
+                    ↓
+                  </button>
                   <button
                     type="button"
                     onClick={(e) => {
@@ -1296,6 +1561,7 @@ export function ApiMode() {
                             onClick={() => {
                               persistTabs();
                               setActiveRequestId(t.id);
+                              setExpandedTabIds((p) => ({ ...p, [t.id]: true }));
                             }}
                             draggable
                             onDragStart={(e) => {
@@ -1325,6 +1591,19 @@ export function ApiMode() {
                               <div className="mt-1 truncate text-[11px] font-bold text-(--muted)">{t.url || "(no url)"}</div>
                             </div>
                             <div className="relative flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  persistTabs();
+                                  setActiveRequestId(t.id);
+                                  openAndScrollToResponse(t.id);
+                                }}
+                                className="rounded-lg bg-(--btn) px-2 py-0.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                                title="Xổ xuống Response/Logs"
+                              >
+                                ↓
+                              </button>
                               <button
                                 type="button"
                                 onClick={(e) => {
@@ -1700,9 +1979,12 @@ export function ApiMode() {
                     try {
                       const obj = JSON.parse(bodyText || "null");
                       setBodyText(JSON.stringify(obj, null, 2));
-                      setError(null);
+                      setTabRuns((p) => ({ ...p, [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: null } }));
                     } catch {
-                      setError("Body không phải JSON hợp lệ để format.");
+                      setTabRuns((p) => ({
+                        ...p,
+                        [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: "Body không phải JSON hợp lệ để format." }
+                      }));
                     }
                   }}
                   className="rounded-xl bg-white/10 px-4 py-2 text-sm font-extrabold text-slate-100 hover:bg-white/15"
@@ -1832,6 +2114,34 @@ export function ApiMode() {
           </label>
         </div>
 
+        <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-xs font-extrabold text-slate-200">
+          <input type="checkbox" checked={insecureTls} onChange={(e) => setInsecureTls(e.target.checked)} />
+          Ignore TLS errors (self-signed) (dev only)
+        </label>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+          <label className="flex items-center gap-2 text-xs font-extrabold text-slate-200">
+            <input type="checkbox" checked={useCookieJar} onChange={(e) => setUseCookieJar(e.target.checked)} />
+            Cookie jar (tự lưu/gửi cookie như Postman)
+          </label>
+          <button
+            onClick={async () => {
+              try {
+                await qa().clearCookies();
+                setTabRuns((p) => ({ ...p, [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: null } }));
+              } catch (e) {
+                setTabRuns((p) => ({
+                  ...p,
+                  [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: e instanceof Error ? e.message : String(e) }
+                }));
+              }
+            }}
+            className="rounded-xl bg-(--btn) px-3 py-1.5 text-xs font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+          >
+            Clear cookies
+          </button>
+        </div>
+
         <div className="flex items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-2">
             <button
@@ -1870,50 +2180,219 @@ export function ApiMode() {
         </div>
       </div>
 
-      {error ? <div className="text-sm text-red-300">{error}</div> : null}
+      {/* Result + Logs (per active tab) - move to bottom of main detail */}
+      <div ref={responseLogsRef} className="rounded-2xl border border-(--border) bg-(--surface-2) p-3">
+        <button
+          type="button"
+          onClick={() => setExpandedTabIds((p) => ({ ...p, [safeActiveReq.id]: !(p[safeActiveReq.id] ?? true) }))}
+          className="flex w-full items-center justify-between gap-3 rounded-xl bg-black/20 px-3 py-2 text-left"
+        >
+          <div className="text-xs font-extrabold text-(--app-fg)">Response / Logs</div>
+          <div className="text-[11px] font-bold text-(--muted)">{resultOpen ? "Hide" : "Show"}</div>
+        </button>
 
-      {logs.length ? (
-        <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
-          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-            <div className="text-sm font-extrabold">Logs</div>
-            <div className="text-xs text-slate-400">Entries: {logs.length} (max 200)</div>
-          </div>
-          <div className="grid gap-2">
-            {logs.map((l, idx) => (
-              <div key={idx} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/20 p-3">
-                <div className="min-w-0 text-xs text-slate-300">
-                  <span className="font-extrabold text-slate-100">{l.method}</span>{" "}
-                  <span className="truncate">{l.url}</span>
-                  <span className="mx-2 text-slate-500">•</span>
-                  <span className="text-slate-400">{l.at}</span>
+        {resultOpen ? (
+          <div className="mt-3 grid gap-3">
+            {activeRun.error ? (
+              <div className="text-xs font-extrabold text-red-300">{activeRun.error}</div>
+            ) : null}
+
+            {activeHistory.length === 0 ? (
+              <div className="text-[11px] font-bold text-(--muted)">Chưa có log cho request này.</div>
+            ) : null}
+
+            {activeHistory.length ? (
+              <div className="grid gap-2 rounded-xl border border-white/10 bg-black/20 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-[11px] font-extrabold text-slate-200">
+                    Total: <span className="text-slate-100">{logStats.total}</span>
+                    <span className="mx-2 text-slate-500">•</span>
+                    PASS: <span className="text-emerald-300">{logStats.pass}</span>
+                    <span className="mx-2 text-slate-500">•</span>
+                    FAIL: <span className="text-red-300">{logStats.fail}</span>
+                    <span className="mx-2 text-slate-500">•</span>
+                    Showing: <span className="text-slate-100">{filteredHistory.length}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={clearLogs}
+                    className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                  >
+                    Clear logs
+                  </button>
                 </div>
-                <div className="flex items-center gap-2">
-                  {l.method === "SCENARIO" ? (
-                    <span className="rounded-full bg-fuchsia-300 px-2 py-0.5 text-[11px] font-extrabold text-slate-950">
-                      SCENARIO
-                    </span>
-                  ) : (
-                    <>
-                      <span className={["rounded-full px-2 py-0.5 text-[11px] font-extrabold", l.ok ? "bg-emerald-300 text-slate-950" : "bg-red-400 text-slate-950"].join(" ")}>
-                        {l.ok ? "PASS" : "FAIL"}
-                      </span>
-                      <span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] font-extrabold text-slate-200">
-                        {l.status} • {l.elapsedMs}ms
-                      </span>
-                    </>
-                  )}
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex items-center gap-1 rounded-xl border border-white/10 bg-black/20 p-1">
+                    {(["all", "pass", "fail"] as const).map((s) => (
+                      <button
+                        key={s}
+                        type="button"
+                        onClick={() =>
+                          setLogFiltersByTabId((p) => ({
+                            ...p,
+                            [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { status: "all", q: "" }), status: s }
+                          }))
+                        }
+                        className={[
+                          "rounded-lg px-3 py-1 text-[11px] font-extrabold",
+                          activeFilter.status === s ? "bg-blue-500 text-white" : "bg-transparent text-slate-200 hover:bg-white/10"
+                        ].join(" ")}
+                      >
+                        {s.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
+
+                  <input
+                    value={activeFilter.q}
+                    onChange={(e) =>
+                      setLogFiltersByTabId((p) => ({
+                        ...p,
+                        [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { status: "all", q: "" }), q: e.target.value }
+                      }))
+                    }
+                    placeholder="Filter by method / URL / status..."
+                    className="min-w-[240px] flex-1 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-bold text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/20"
+                  />
                 </div>
               </div>
-            ))}
-          </div>
-        </div>
-      ) : null}
+            ) : null}
 
-      {result ? (
-        <pre className="max-h-80 overflow-auto rounded-xl border border-white/10 bg-black/30 p-3 text-sm text-slate-100">
-          {JSON.stringify(result, null, 2)}
-        </pre>
-      ) : null}
+            {filteredHistory.length ? (
+              <div className="max-h-56 overflow-auto rounded-xl border border-(--border) bg-black/20 p-2">
+                <div className="grid gap-1">
+                  {filteredHistory.slice(0, 120).map((h: any, idx: number) => {
+                    const l = {
+                      at: h?.at,
+                      method: h?.method,
+                      url: h?.url,
+                      ok: Boolean(h?.result?.ok),
+                      status: Number(h?.result?.status ?? 0),
+                      elapsedMs: Number(h?.result?.elapsedMs ?? 0)
+                    };
+                    const isOpen = expandedIdx === idx;
+                    const r = h?.result;
+                    const bodyText = String(r?.bodyText ?? "");
+                    const hasBody = Boolean(bodyText.trim());
+                    return (
+                    <div key={idx} className="grid gap-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          // Keep selection within current filtered list; detail uses current selected entry anyway.
+                          setSelectedRunIdxByTabId((p) => ({ ...p, [safeActiveReq.id]: idx }));
+                          setExpandedRunIdxByTabId((p) => ({
+                            ...p,
+                            [safeActiveReq.id]: (p[safeActiveReq.id] ?? null) === idx ? null : idx
+                          }));
+                        }}
+                        className={[
+                          "flex w-full flex-wrap items-center justify-between gap-2 rounded-lg border border-white/10 bg-black/20 px-2 py-1.5 text-left hover:bg-black/30",
+                          selectedIdx === idx ? "outline outline-blue-400/60" : ""
+                        ].join(" ")}
+                      >
+                        <div className="min-w-0 text-[11px] font-bold text-slate-300">
+                          <span className="font-extrabold text-slate-100">{l.method}</span>{" "}
+                          <span className="truncate">{l.url}</span>
+                        </div>
+                        <div className="flex items-center gap-2 text-[11px] font-extrabold">
+                          {l.method === "SCENARIO" ? (
+                            <span className="rounded-full bg-fuchsia-300 px-2 py-0.5 text-slate-950">SCENARIO</span>
+                          ) : (
+                            <>
+                              <span
+                                className={[
+                                  "rounded-full px-2 py-0.5",
+                                  l.ok ? "bg-emerald-300 text-slate-950" : "bg-red-400 text-slate-950"
+                                ].join(" ")}
+                              >
+                                {l.ok ? "PASS" : "FAIL"}
+                              </span>
+                              <span className="rounded-full bg-white/10 px-2 py-0.5 text-slate-200">
+                                {l.status} • {l.elapsedMs}ms
+                              </span>
+                            </>
+                          )}
+                        </div>
+                      </button>
+                      {isOpen ? (
+                        <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                          <div className="mb-2 flex flex-wrap items-center gap-2">
+                            <div className="text-[11px] font-extrabold text-slate-200">{String(l.at ?? "")}</div>
+                            <div className="ml-auto flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                disabled={!hasBody}
+                                onClick={() => setPreview({ open: true, tabId: safeActiveReq.id, mode: "raw" })}
+                                className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover) disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                Preview Raw
+                              </button>
+                              <button
+                                type="button"
+                                disabled={!hasBody}
+                                onClick={() => setPreview({ open: true, tabId: safeActiveReq.id, mode: "json" })}
+                                className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover) disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                Preview JSON
+                              </button>
+                              <button
+                                type="button"
+                                disabled={!hasBody}
+                                onClick={() => setPreview({ open: true, tabId: safeActiveReq.id, mode: "html" })}
+                                className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover) disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                Preview HTML
+                              </button>
+                              <button
+                                type="button"
+                                onClick={clearLogs}
+                                className="rounded-xl bg-(--btn) px-3 py-1.5 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                              >
+                                Clear
+                              </button>
+                            </div>
+                          </div>
+
+                          {Array.isArray(r?.validations) && r.validations.length ? (
+                            <div className="grid gap-1">
+                              <div className="text-xs font-extrabold text-slate-200">Validations</div>
+                              {r.validations.map((v: any, i: number) => (
+                                <div key={i} className="rounded-lg border border-white/10 bg-black/20 px-2 py-1.5">
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div className="text-[11px] font-extrabold text-slate-100">{String(v?.name ?? `#${i + 1}`)}</div>
+                                    <span
+                                      className={[
+                                        "rounded-full px-2 py-0.5 text-[11px] font-extrabold",
+                                        v?.ok ? "bg-emerald-300 text-slate-950" : "bg-red-400 text-slate-950"
+                                      ].join(" ")}
+                                    >
+                                      {v?.ok ? "PASS" : "FAIL"}
+                                    </span>
+                                  </div>
+                                  {v?.details ? (
+                                    <div className="mt-1 text-[11px] font-bold text-slate-400">{String(v.details)}</div>
+                                  ) : null}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="text-[11px] font-bold text-(--muted)">Không có validations.</div>
+                          )}
+                        </div>
+                      ) : null}
+                    </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+
+      {/* Logs/results are shown in main detail (per active tab). */}
 
       {scenarios ? (
         <pre className="max-h-80 overflow-auto rounded-xl border border-white/10 bg-black/30 p-3 text-sm text-slate-100">

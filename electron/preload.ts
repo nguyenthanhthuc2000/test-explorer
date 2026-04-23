@@ -29,6 +29,8 @@ export type QaApi = {
     binary?: { filename?: string; mime?: string; base64: string };
     timeoutMs?: number;
     expect?: { status?: number; maxMs?: number };
+    insecureTls?: boolean;
+    useCookieJar?: boolean;
   }) => Promise<{
     ok: boolean;
     status: number;
@@ -53,6 +55,7 @@ export type QaApi = {
   testOllama: () => Promise<{ ok: boolean; status: number; url: string; json: any; text: string }>;
   testOpenAI: () => Promise<{ ok: boolean; status: number; url: string; json: any; text: string }>;
   listOpenAIModels: () => Promise<{ url: string; models: string[] }>;
+  clearCookies: () => Promise<boolean>;
 };
 
 const qa: QaApi = {
@@ -70,7 +73,8 @@ const qa: QaApi = {
   ,
   testOllama: () => ipcRenderer.invoke("test-ollama"),
   testOpenAI: () => ipcRenderer.invoke("test-openai"),
-  listOpenAIModels: () => ipcRenderer.invoke("list-openai-models")
+  listOpenAIModels: () => ipcRenderer.invoke("list-openai-models"),
+  clearCookies: () => ipcRenderer.invoke("clear-cookies")
 };
 
 console.log("[preload] exposing window.qa");

@@ -10,6 +10,18 @@ import { env } from "../../config/env";
 import { getConfig } from "../../db/repository/config.repo";
 import { ollamaGenerate } from "../../ai/ollama";
 import { buildApiTestScenariosPrompt } from "../../ai/prompt";
+import { CookieJar } from "tough-cookie";
+
+const cookieJars = new Map<string, CookieJar>();
+
+function jarKeyForUrl(url: string) {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return "invalid";
+  }
+}
 
 export function registerTestIpc() {
   ipcMain.handle(IPC_CHANNELS.runTest, async (_event, payload: { url: string }) => {
@@ -48,6 +60,11 @@ export function registerTestIpc() {
     return { run, steps };
   });
 
+  ipcMain.handle("clear-cookies", async () => {
+    cookieJars.clear();
+    return true;
+  });
+
   ipcMain.handle("run-api", async (_event, payload: {
     method: string;
     url: string;
@@ -58,6 +75,8 @@ export function registerTestIpc() {
     binary?: { filename?: string; mime?: string; base64: string };
     timeoutMs?: number;
     expect?: { status?: number; maxMs?: number };
+    insecureTls?: boolean;
+    useCookieJar?: boolean;
   }) => {
     const started = Date.now();
     const timeoutMs = Math.max(0, Math.trunc(payload.timeoutMs ?? 0));
@@ -66,11 +85,15 @@ export function registerTestIpc() {
     const headers: Record<string, string> = { ...(payload.headers ?? {}) };
     const bodyType = payload.bodyType ?? "raw";
     let body: any = undefined;
+    const method = String(payload.method ?? "GET").toUpperCase();
 
     function hasHeader(name: string) {
       const n = name.toLowerCase();
       return Object.keys(headers).some((k) => k.toLowerCase() === n);
     }
+
+    // GET/HEAD must not send body (undici will throw).
+    const forbidBody = method === "GET" || method === "HEAD";
 
     if (bodyType === "none") {
       body = undefined;
@@ -107,14 +130,74 @@ export function registerTestIpc() {
       if (payload.binary?.mime && !hasHeader("content-type")) headers["content-type"] = payload.binary.mime;
     }
 
-    const res = await fetch(payload.url, {
-      method: payload.method,
-      headers,
-      body,
-      signal: ctrl?.signal
-    }).finally(() => {
-      if (t) clearTimeout(t);
-    });
+    if (forbidBody) body = undefined;
+
+    const insecureTls = Boolean(payload.insecureTls);
+    const url = String(payload.url ?? "");
+    const useCookieJar = Boolean(payload.useCookieJar);
+
+    if (useCookieJar && url) {
+      const key = jarKeyForUrl(url);
+      if (key !== "invalid") {
+        const jar = cookieJars.get(key) ?? new CookieJar();
+        cookieJars.set(key, jar);
+        // Only attach cookie header if user didn't set it manually.
+        if (!hasHeader("cookie")) {
+          const cookie = jar.getCookieStringSync(url);
+          if (cookie) headers["cookie"] = cookie;
+        }
+      }
+    }
+
+    let res: Response;
+    try {
+      const prevTls = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+      if (insecureTls && /^https:/i.test(url)) {
+        // NOTE: this disables TLS verification in Node for this request window.
+        // We restore it right after the fetch completes.
+        process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+      }
+      try {
+        res = await fetch(url, {
+          method,
+          headers,
+          body,
+          signal: ctrl?.signal
+        }).finally(() => {
+          if (t) clearTimeout(t);
+        });
+      } finally {
+        process.env.NODE_TLS_REJECT_UNAUTHORIZED = prevTls;
+      }
+    } catch (e: any) {
+      const cause = e?.cause;
+      const code = cause?.code ?? e?.code;
+      const causeMsg = cause?.message ?? e?.message ?? String(e);
+      if (code === "DEPTH_ZERO_SELF_SIGNED_CERT" || /self signed certificate/i.test(causeMsg)) {
+        throw new Error(
+          "HTTPS self-signed certificate. Hãy chuyển sang HTTP, hoặc bật tuỳ chọn 'Ignore TLS errors (self-signed)' trong UI để test môi trường dev."
+        );
+      }
+      throw new Error(`Fetch failed: ${causeMsg}${code ? ` (${code})` : ""}`);
+    }
+
+    // Capture Set-Cookie into cookie jar (best-effort)
+    if (useCookieJar && url) {
+      const key = jarKeyForUrl(url);
+      const jar = key !== "invalid" ? cookieJars.get(key) : null;
+      const getSetCookie = (res.headers as any)?.getSetCookie;
+      const setCookies: string[] = typeof getSetCookie === "function" ? (getSetCookie.call(res.headers) as string[]) : [];
+      if (jar && Array.isArray(setCookies) && setCookies.length) {
+        for (const sc of setCookies) {
+          try {
+            jar.setCookieSync(sc, url);
+          } catch {
+            // ignore bad cookies
+          }
+        }
+      }
+    }
+
     const bodyText = await res.text();
     const elapsedMs = Date.now() - started;
 

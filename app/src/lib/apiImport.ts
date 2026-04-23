@@ -12,6 +12,7 @@ export type ImportedApiRequest = {
   body?: { type?: "none" | "raw" | "json" | "form_urlencoded" | "form_data"; text?: string; fields?: Array<{ key: string; value: string }> };
   timeoutMs?: number;
   expect?: { status?: number; maxMs?: number };
+  insecureTls?: boolean;
 };
 
 function unquote(s: string) {
@@ -82,6 +83,7 @@ export function importFromCurl(text: string): ImportedApiRequest[] {
   let bodyType: ImportedApiRequest["body"] extends infer B ? (B extends any ? B : never) : never;
   let url = "";
   const formFields: Array<{ key: string; value: string }> = [];
+  let insecureTls = false;
 
   function takeValue(i: number) {
     const v = tokens[i + 1];
@@ -110,6 +112,20 @@ export function importFromCurl(text: string): ImportedApiRequest[] {
       const parsed = parseHeaderLine(hv);
       if (parsed) headers[parsed.key] = parsed.value;
       i++;
+      continue;
+    }
+    if (t === "-b" || t === "--cookie") {
+      const cv = takeValue(i);
+      // If user passes cookie string (not cookie-jar file), map to header.
+      // curl also supports -b <file>; we only support inline cookie string.
+      if (cv && !cv.startsWith("@")) {
+        headers["cookie"] = cv;
+      }
+      i++;
+      continue;
+    }
+    if (t === "--insecure" || t === "-k") {
+      insecureTls = true;
       continue;
     }
     if (
@@ -168,7 +184,7 @@ export function importFromCurl(text: string): ImportedApiRequest[] {
     body = { type: "none" };
   }
 
-  return [{ method: String(method).toUpperCase(), url, headers, body }];
+  return [{ method: String(method).toUpperCase(), url, headers, body, insecureTls }];
 }
 
 export function importFromGrpcurl(text: string): ImportedApiRequest[] {
