@@ -46,6 +46,64 @@ function rowsToHeaders(rows: HeaderRow[]): Record<string, string> {
   return out;
 }
 
+function EditorWithLineNumbers(props: {
+  value: string;
+  onChange: (next: string) => void;
+  placeholder?: string;
+  minRows?: number;
+}) {
+  const { value, onChange, placeholder, minRows = 7 } = props;
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
+  const gutterRef = useRef<HTMLDivElement | null>(null);
+  const lines = useMemo(() => {
+    const n = Math.max(1, String(value ?? "").split("\n").length);
+    return Array.from({ length: n }, (_, i) => i + 1);
+  }, [value]);
+
+  const syncScroll = () => {
+    const ta = taRef.current;
+    const gut = gutterRef.current;
+    if (!ta || !gut) return;
+    gut.scrollTop = ta.scrollTop;
+  };
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-white/15 bg-black/30">
+      <div className="grid grid-cols-[48px_1fr]">
+        <div
+          ref={gutterRef}
+          aria-hidden="true"
+          className="max-h-[50vh] overflow-hidden border-r border-white/10 bg-black/20 px-2 py-2 text-right text-[12px] font-bold text-slate-500"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            try {
+              taRef.current?.focus();
+            } catch {
+              // ignore
+            }
+          }}
+        >
+          <div className="select-none leading-6">
+            {lines.map((n) => (
+              <div key={n}>{n}</div>
+            ))}
+          </div>
+        </div>
+        <textarea
+          ref={taRef}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          onScroll={syncScroll}
+          rows={minRows}
+          spellCheck={false}
+          className="relative z-10 max-h-[50vh] w-full resize-y bg-transparent px-3 py-2 font-mono text-[12px] font-semibold leading-6 text-slate-100 outline-none placeholder:text-slate-500"
+          placeholder={placeholder}
+        />
+      </div>
+    </div>
+  );
+}
+
 function newDefaultApiTab(): ApiRequestTab {
   return {
     id: newId(),
@@ -2883,11 +2941,10 @@ export function ApiMode() {
                 </div>
               </div>
             ) : bodyType === "raw" || bodyType === "json" ? (
-              <textarea
+              <EditorWithLineNumbers
                 value={bodyText}
-                onChange={(e) => setBodyText(e.target.value)}
-                rows={7}
-                className="resize-y rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
+                onChange={(v) => setBodyText(v)}
+                minRows={7}
                 placeholder={bodyType === "json" ? '{ "hello": "world" }' : "raw body"}
               />
             ) : (
