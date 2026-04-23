@@ -1379,13 +1379,6 @@ export function ApiMode() {
 
         {/* Main editor */}
         <div className="grid gap-3 rounded-2xl border border-(--border) bg-(--surface) p-4">
-          <div className="text-xs text-(--muted)">
-            URL:{" "}
-            <span className="inline-block max-w-full truncate align-bottom font-extrabold text-(--app-fg)">
-              {safeActiveReq.url}
-            </span>
-          </div>
-
         <div className="grid gap-2 md:grid-cols-2">
           <label className="grid gap-1">
             <div className="text-xs font-bold text-slate-300">Name</div>
@@ -1508,9 +1501,10 @@ export function ApiMode() {
                 + Add
               </button>
             </div>
-            <div className="grid gap-2 rounded-xl border border-white/10 bg-black/20 p-3">
-              {paramRows.map((r) => (
-                <div key={r.id} className="grid grid-cols-[28px_1fr_1fr_40px] gap-2">
+            <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+              <div className="grid max-h-[40vh] gap-2 overflow-auto pr-1 [scrollbar-gutter:stable] md:max-h-[calc(100vh-520px)]">
+                {paramRows.map((r) => (
+                  <div key={r.id} className="grid grid-cols-[28px_1fr_1fr_40px] gap-2">
                   <label className="grid place-items-center">
                     <input
                       type="checkbox"
@@ -1544,8 +1538,9 @@ export function ApiMode() {
                   >
                     ×
                   </button>
-                </div>
-              ))}
+                  </div>
+                ))}
+              </div>
               <div className="text-xs text-slate-400">
                 URL: <span className="text-slate-200">{finalUrl}</span>
               </div>
@@ -1637,9 +1632,10 @@ export function ApiMode() {
                 + Add
               </button>
             </div>
-            <div className="grid gap-2 rounded-xl border border-white/10 bg-black/20 p-3">
-              {headerRows.map((r) => (
-                <div key={r.id} className="grid grid-cols-[28px_1fr_1fr_40px] gap-2">
+            <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+              <div className="grid max-h-[40vh] gap-2 overflow-auto pr-1 [scrollbar-gutter:stable] md:max-h-[calc(100vh-520px)]">
+                {headerRows.map((r) => (
+                  <div key={r.id} className="grid grid-cols-[28px_1fr_1fr_40px] gap-2">
                   <label className="grid place-items-center">
                     <input
                       type="checkbox"
@@ -1673,8 +1669,9 @@ export function ApiMode() {
                   >
                     ×
                   </button>
-                </div>
-              ))}
+                  </div>
+                ))}
+              </div>
               {headerRows.length === 0 ? <div className="text-xs text-slate-400">No headers</div> : null}
             </div>
           </div>
