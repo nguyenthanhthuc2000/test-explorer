@@ -221,6 +221,14 @@ export function ApiMode() {
     tabId: "",
     mode: "raw"
   });
+  const [advancedOpen, setAdvancedOpen] = useState<boolean>(() => {
+    try {
+      const raw = localStorage.getItem("ai-qa.api.advancedOpen.v1");
+      return raw ? Boolean(JSON.parse(raw)) : false;
+    } catch {
+      return false;
+    }
+  });
   const [scenarios, setScenarios] = useState<string>("");
   const [genLoading, setGenLoading] = useState(false);
   const [scenarioLimit, setScenarioLimit] = useState<number>(5);
@@ -271,6 +279,14 @@ export function ApiMode() {
       clearInterval(t);
     };
   }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("ai-qa.api.advancedOpen.v1", JSON.stringify(Boolean(advancedOpen)));
+    } catch {
+      // ignore
+    }
+  }, [advancedOpen]);
 
   useEffect(() => {
     // Persist per-tab response/log history
@@ -2083,99 +2099,150 @@ export function ApiMode() {
           </div>
         )}
 
-        <div className="grid gap-2 md:grid-cols-3">
-          <label className="grid gap-1">
-            <div className="text-xs font-bold text-slate-300">Expect status</div>
-            <input
-              type="number"
-              value={expectStatus}
-              onChange={(e) => setExpectStatus(Number(e.target.value))}
-              className="rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none focus:border-white/25"
-            />
-          </label>
-          <label className="grid gap-1">
-            <div className="text-xs font-bold text-slate-300">Max time (ms)</div>
-            <input
-              type="number"
-              value={maxMs}
-              onChange={(e) => setMaxMs(Number(e.target.value))}
-              className="rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none focus:border-white/25"
-            />
-          </label>
-          <label className="grid gap-1">
-            <div className="text-xs font-bold text-slate-300">Timeout (ms)</div>
-            <input
-              type="number"
-              value={timeoutMs}
-              onChange={(e) => setTimeoutMs(Number(e.target.value))}
-              className="rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/25"
-              placeholder="5000"
-            />
-          </label>
-        </div>
-
-        <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-xs font-extrabold text-slate-200">
-          <input type="checkbox" checked={insecureTls} onChange={(e) => setInsecureTls(e.target.checked)} />
-          Ignore TLS errors (self-signed) (dev only)
-        </label>
-
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2">
-          <label className="flex items-center gap-2 text-xs font-extrabold text-slate-200">
-            <input type="checkbox" checked={useCookieJar} onChange={(e) => setUseCookieJar(e.target.checked)} />
-            Cookie jar (tự lưu/gửi cookie như Postman)
-          </label>
+        <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
           <button
-            onClick={async () => {
-              try {
-                await qa().clearCookies();
-                setTabRuns((p) => ({ ...p, [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: null } }));
-              } catch (e) {
-                setTabRuns((p) => ({
-                  ...p,
-                  [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: e instanceof Error ? e.message : String(e) }
-                }));
-              }
-            }}
-            className="rounded-xl bg-(--btn) px-3 py-1.5 text-xs font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+            type="button"
+            onClick={() => setAdvancedOpen((v) => !v)}
+            className="flex w-full items-center justify-between gap-3 rounded-xl bg-black/20 px-3 py-2 text-left"
           >
-            Clear cookies
+            <div className="text-xs font-extrabold text-slate-200">Advanced (AI Testing / TLS / Cookies / Scenarios)</div>
+            <div className="text-[11px] font-bold text-slate-400">{advancedOpen ? "Hide" : "Show"}</div>
           </button>
-        </div>
 
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={generateScenarios}
-              disabled={genLoading}
-              className="rounded-xl bg-white/10 px-4 py-2 text-sm font-extrabold text-slate-100 hover:bg-white/15 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {genLoading ? "Generating..." : "Tạo kịch bản test"}
-            </button>
-            <label className="grid gap-1">
-              <input
-                type="number"
-                min={1}
-                max={30}
-                placeholder="5"
-                value={scenarioLimit}
-                onChange={(e) => setScenarioLimit(Number(e.target.value))}
-                className="w-28 rounded-xl border border-white/15 bg-black/30 px-3 py-2 text-xs font-bold text-slate-100 outline-none focus:border-white/25"
-              />
-            </label>
-            <button
-              onClick={runAllScenarios}
-              disabled={scenarioRunLoading || !scenarios.trim()}
-              className="rounded-xl bg-emerald-400 px-4 py-2 text-sm font-extrabold text-slate-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {scenarioRunLoading ? "Running..." : "Chạy tất cả kịch bản test"}
-            </button>
-            <button
-              onClick={clearLogs}
-              className="rounded-xl bg-white/10 px-4 py-2 text-sm font-extrabold text-slate-100 hover:bg-white/15"
-            >
-              Xóa log
-            </button>
-          </div>
+          {!advancedOpen ? (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
+                <span className="text-slate-300">Expect</span>
+                <span className="text-slate-100">{expectStatus}</span>
+                <span className="text-slate-500">•</span>
+                <span className="text-slate-300">Max</span>
+                <span className="text-slate-100">{maxMs}ms</span>
+                <span className="text-slate-500">•</span>
+                <span className="text-slate-300">Timeout</span>
+                <span className="text-slate-100">{timeoutMs}ms</span>
+              </div>
+              <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
+                <input type="checkbox" checked={insecureTls} onChange={(e) => setInsecureTls(e.target.checked)} />
+                TLS ignore
+              </label>
+              <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
+                <input type="checkbox" checked={useCookieJar} onChange={(e) => setUseCookieJar(e.target.checked)} />
+                Cookie jar
+              </label>
+              <button
+                type="button"
+                onClick={clearLogs}
+                className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+              >
+                Clear logs
+              </button>
+              <button
+                type="button"
+                onClick={() => openAndScrollToResponse(safeActiveReq.id)}
+                className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+              >
+                Jump to logs
+              </button>
+            </div>
+          ) : (
+            <div className="mt-3 grid gap-2">
+              <div className="grid gap-2 md:grid-cols-3">
+                <label className="grid gap-1">
+                  <div className="text-[11px] font-bold text-slate-300">Expect status</div>
+                  <input
+                    type="number"
+                    value={expectStatus}
+                    onChange={(e) => setExpectStatus(Number(e.target.value))}
+                    className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-100 outline-none focus:border-white/20"
+                  />
+                </label>
+                <label className="grid gap-1">
+                  <div className="text-[11px] font-bold text-slate-300">Max time (ms)</div>
+                  <input
+                    type="number"
+                    value={maxMs}
+                    onChange={(e) => setMaxMs(Number(e.target.value))}
+                    className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-100 outline-none focus:border-white/20"
+                  />
+                </label>
+                <label className="grid gap-1">
+                  <div className="text-[11px] font-bold text-slate-300">Timeout (ms)</div>
+                  <input
+                    type="number"
+                    value={timeoutMs}
+                    onChange={(e) => setTimeoutMs(Number(e.target.value))}
+                    className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-100 outline-none placeholder:text-slate-500 focus:border-white/20"
+                    placeholder="5000"
+                  />
+                </label>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
+                  <input type="checkbox" checked={insecureTls} onChange={(e) => setInsecureTls(e.target.checked)} />
+                  Ignore TLS errors (self-signed) (dev)
+                </label>
+
+                <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
+                  <input type="checkbox" checked={useCookieJar} onChange={(e) => setUseCookieJar(e.target.checked)} />
+                  Cookie jar
+                </label>
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await qa().clearCookies();
+                      setTabRuns((p) => ({ ...p, [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: null } }));
+                    } catch (e) {
+                      setTabRuns((p) => ({
+                        ...p,
+                        [safeActiveReq.id]: { ...(p[safeActiveReq.id] ?? { logs: [] }), error: e instanceof Error ? e.message : String(e) }
+                      }));
+                    }
+                  }}
+                  className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                >
+                  Clear cookies
+                </button>
+
+                <button
+                  type="button"
+                  onClick={clearLogs}
+                  className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover)"
+                >
+                  Clear logs
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={generateScenarios}
+                  disabled={genLoading}
+                  className="rounded-xl bg-(--btn) px-3 py-2 text-[11px] font-extrabold text-(--app-fg) hover:bg-(--btn-hover) disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {genLoading ? "Generating..." : "Tạo kịch bản test"}
+                </button>
+                <label className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-[11px] font-extrabold text-slate-200">
+                  Limit
+                  <input
+                    type="number"
+                    min={1}
+                    max={30}
+                    value={scenarioLimit}
+                    onChange={(e) => setScenarioLimit(Number(e.target.value))}
+                    className="w-20 rounded-lg border border-white/10 bg-black/30 px-2 py-1 text-[11px] font-extrabold text-slate-100 outline-none focus:border-white/20"
+                  />
+                </label>
+                <button
+                  onClick={runAllScenarios}
+                  disabled={scenarioRunLoading || !scenarios.trim()}
+                  className="rounded-xl bg-emerald-400 px-3 py-2 text-[11px] font-extrabold text-slate-950 hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {scenarioRunLoading ? "Running..." : "Chạy tất cả kịch bản test"}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
         </div>
       </div>
